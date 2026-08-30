@@ -3,9 +3,20 @@
 Bitcoin vanity address search — an address that starts with something you chose,
 `1Btcoin…` rather than `1Kx7…`.
 
-Two engines. [vanitygen](https://github.com/samr7/vanitygen) on the CPU, and a
-CUDA kernel here that does the same job **215x faster**. Neither is believed on
-its own: every result is re-derived from first principles before it is reported.
+**Two separate engines**, not one ported from one place to another:
+
+- **[vanitygen](https://github.com/samr7/vanitygen), on the CPU.** Third-party,
+  2013, OpenSSL-based. It stays on the CPU. What was done to it was make it
+  *build* on a current system — it targets OpenSSL 1.0 and PCRE1, neither of
+  which exists here — and fix two real bugs found along the way. It is still
+  useful beyond searching: because it derives addresses with OpenSSL, it is an
+  independent implementation to check our own maths against.
+- **`cuda/vanity.cu`, on the GPU.** Written here, from scratch, in CUDA. Does
+  the same job **215x faster**. It is not vanitygen compiled for a GPU and
+  shares no code with it.
+
+Neither is believed on its own: every result from either is re-derived from
+first principles before it is reported.
 
 ```bash
 npm install
@@ -17,6 +28,20 @@ npm run gpu -- 1Btcoin        # ~13 seconds
 npm run vanity -- 1Btc        # the CPU tool
 npm run matches               # what has been found
 ```
+
+### What was *not* done
+
+Two things get assumed, and neither is true here:
+
+- **vanitygen was not moved to the GPU.** Its own GPU engine, `oclvanitygen`,
+  is deliberately not built — it reads OpenSSL's private `struct ec_point_st`,
+  whose layout changed in 1.1 and again in 3.0, so reproducing it would be
+  guesswork that corrupts memory rather than failing loudly. `cuda/vanity.cu`
+  exists instead, and is far faster than that engine ever was.
+- **Nothing here uses OpenCL.** The upgrade was to **OpenSSL 3.0** — the crypto
+  library — not OpenCL, the GPU API. Easy to misread, completely different
+  things. The GPU work is CUDA (`nvcc -arch=sm_89`); there is no OpenCL in this
+  project at all.
 
 ## Rate
 
@@ -149,11 +174,8 @@ into `vendor/vanitygen/` (gitignored) at a pinned commit, applies the patch, and
 builds it; it runs as a subprocess and is never linked. Only the patch is
 tracked. See `vendor/README.md`.
 
-`oclvanitygen`, its own 2013 OpenCL engine, is deliberately **not** built: it
-reads OpenSSL's private `struct ec_point_st`, whose layout changed in 1.1 and
-again in 3.0, so reproducing it would be guesswork that corrupts memory rather
-than failing loudly. `cuda/vanity.cu` exists instead, and is far faster than
-that engine ever was.
+Only `vanitygen` and `keyconv` are built from it — see "What was *not* done"
+above for why its OpenCL engine is left alone.
 
 ## Security posture
 
