@@ -148,6 +148,27 @@ check('dropping the checksum shifts the bounds and nothing else', () => {
       }
     });
 
+    await checkAsync('difficulty is counted over reachable addresses', async () => {
+      // vanitygen divides the 2^192 space of 25-byte values. Only 2^160 of
+      // those are addresses anyone can reach -- the checksum is determined by
+      // the hash160, not free -- so we divide that instead. For any prefix
+      // short enough to search the two agree, which the check above holds us
+      // to; the difference only appears once a prefix pins the address to
+      // fewer than 2^32 values.
+      //
+      // A complete address is the extreme case: exactly one key produces it,
+      // so the answer is 2^160. Reporting 2^192 there overstated the work by a
+      // factor of four billion.
+      const whole = '1QKBaU6WAeycb3DbKbLBkX7vJiaS8r42Xo';
+      assert.strictEqual(range.difficulty(whole), 1n << 160n,
+        'a full address should cost exactly 2^160, one key per address');
+      assert.ok(range.difficulty(whole) < (1n << 192n) / 1000000n,
+        'still counting the unreachable 25-byte values');
+
+      // and a 33-character prefix is 58x easier than the whole thing
+      assert.ok(range.difficulty(whole.slice(0, 33)) < range.difficulty(whole));
+    });
+
     await checkAsync('three leading ones really is two intervals', async () => {
       // The shape of the thing the patch fixes, asserted directly so a
       // regression names itself rather than showing up as a number.

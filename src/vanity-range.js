@@ -100,15 +100,33 @@ function rangeWidth(ranges) {
   return ranges.reduce((t, r) => t + (r.hi - r.lo), 0n);
 }
 
+/** Five big-endian words back to one number. */
+const wordsToBig = (w) => Array.from(w).reduce((a, x) => (a << 32n) | BigInt(x), 0n);
+
 /**
- * Expected keys per match, computed the way vanitygen does it: the whole
- * 2^192 space of 25-byte values with a zero version byte, divided by how many
- * of them match.
+ * Expected addresses per match.
+ *
+ * The obvious denominator is the 2^192 space of 25-byte values with a zero
+ * version byte, and that is what vanitygen uses. It is not quite right: only
+ * 2^160 of those are addresses anyone can reach, because the four checksum
+ * bytes are determined by the hash160 rather than free. So the count is done on
+ * the hash160 instead -- 2^160 possibilities, and however many of them the
+ * prefix admits.
+ *
+ * For any prefix short enough to be worth searching the two agree exactly, and
+ * they must: the ranges differ by the same factor of 2^32 as the spaces do, and
+ * test/range.js holds us to vanitygen's figure. The difference only shows up
+ * once a prefix is long enough to pin the address to fewer than 2^32 values,
+ * which is to say already hopeless -- but there it matters a great deal. A
+ * complete 34-character address came out as 2^192, when the real work is 2^160:
+ * an overstatement by a factor of four billion.
  */
 function difficulty(prefix) {
-  const w = rangeWidth(prefixRanges(prefix));
-  if (w === 0n) return Infinity;
-  return (1n << 192n) / w;
+  const bounds = hash160Bounds(prefix);
+  let matching = 0n;
+  for (const b of bounds) matching += wordsToBig(b.hi) - wordsToBig(b.lo) + 1n;
+  if (matching === 0n) return Infinity;
+  return (1n << 160n) / matching;
 }
 
 /**
@@ -139,4 +157,4 @@ function toWords(v) {
   return w;
 }
 
-module.exports = { prefixRanges, rangeWidth, difficulty, hash160Bounds, toWords };
+module.exports = { prefixRanges, rangeWidth, difficulty, hash160Bounds, toWords, wordsToBig };
