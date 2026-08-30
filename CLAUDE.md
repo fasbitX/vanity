@@ -46,10 +46,27 @@ npm run test:all
 
 ## Traps
 
+- **One curve step = 12 addresses, and the variant number is load-bearing.**
+  The kernel searches six related points -- P, -P, and both endomorphism images
+  of each (`λP = (β·x, y)`, one field multiply; `-P = (x, -y)`, one subtraction)
+  -- in two encodings apiece. It reports WHICH one matched, and
+  `variantKey()` in src/gpu-vanity.js turns that back into a private key
+  (`k`, `n-k`, `λk`, `n-λk`, `λ²k`, `n-λ²k` mod n). Get that mapping wrong and
+  the kernel still finds things, it just reports keys that do not own the
+  addresses found -- the worst failure this program has. confirm() catches it,
+  and test/gpu.js exercises all six against a published key. λ³=1, so six is
+  all of them; there is no seventh.
+- **Rates: 72M curve steps/s, 865M addresses/s.** Those differ by 12x, not 2x.
+  Anything reporting a rate must say which it is.
 - **The GPU never builds an address, and that is the design.** A 25-byte address
   is `hash160 * 2^32 + checksum`, so a prefix is a range on the hash160 — a
   160-bit compare, no Base58, no checksum. Shifting the checksum off rounds
   outward, so a GPU hit is a CANDIDATE, confirmed on the host.
+- **Already measured and rejected** (see README "What the numbers rule out"):
+  specialising the uncompressed padding SHA block (≤5%, nvcc already folds it),
+  dropping the uncompressed encoding (33% SLOWER per address -- the two hash
+  chains hide each other's latency), and returning digests as words instead of
+  bytes (no change). The search is hash-bound now; the curve is 14%.
 - **Prefix difficulty is not 58 per character.** `1Btc` is 77,178, not 195,112 —
   a prefix pins the address *number* to a range, and the first character after
   the leading `1` is only partly constrained. Leading `1`s cost 256 each, not

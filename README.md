@@ -13,7 +13,7 @@ Bitcoin vanity address search — an address that starts with something you chos
   useful beyond searching: because it derives addresses with OpenSSL, it is an
   independent implementation to check our own maths against.
 - **`cuda/vanity.cu`, on the GPU.** Written here, from scratch, in CUDA. Does
-  the same job **215x faster**. It is not vanitygen compiled for a GPU and
+  the same job **366x faster**. It is not vanitygen compiled for a GPU and
   shares no code with it.
 
 Neither is believed on its own: every result from either is re-derived from
@@ -58,15 +58,15 @@ Two things get assumed, and neither is true here:
 
 ## Rate
 
-| engine | keys/s | addresses/s |
+| engine | curve steps/s | addresses/s |
 |---|---|---|
 | vanitygen, 32 threads of a 9950X | 2.36M | 2.36M |
-| `cuda/vanity.cu`, RTX 4070 SUPER | **253.8M** | **507.6M** |
+| `cuda/vanity.cu`, RTX 4070 SUPER | 72.1M | **865M** |
 
-107x the keys, **215x the addresses** — the second factor is larger because the
-kernel searches both public-key encodings, while vanitygen only ever searched
-the uncompressed one. `1Btcoin` takes 13 seconds on the GPU and about 1.8 hours
-on the CPU.
+**366x the addresses.** Addresses is the number that matters — difficulty is
+quoted per address — and the two engines get there differently: vanitygen tries
+one address per key, while a single curve step here yields twelve. `1Btcoin`
+takes about 17 seconds on the GPU and 1.8 hours on the CPU.
 
 ## The trick: no Base58 on the GPU
 
@@ -93,58 +93,68 @@ most one extra hash160 at each end of each range. A reported key is a
 **candidate**: `src/gpu-vanity.js` re-derives it with `src/keys.js` and checks
 the real address before anything is reported.
 
+## Twelve addresses per curve step
+
+The expensive part of the search is not hashing an address, it is *getting a
+point to hash*: an affine addition needs a modular inverse, ~270 multiplies.
+The kernel already amortises that eight ways with Montgomery's trick. The
+endomorphism removes most of what is left.
+
+secp256k1 has a cube root of one in each of its two moduli — `β` mod p and `λ`
+mod n — and they are linked: **`λP` is exactly `(β·x, y)`**. One field multiply
+on the x coordinate produces another valid point on the curve, whose private key
+is `λk mod n`. Doing it again with `β²` produces a third. Negation is cheaper
+still: `−P = (x, −y)`, private key `n − k`.
+
+So one inversion buys six points — `P`, `−P`, `λP`, `−λP`, `λ²P`, `−λ²P` — and
+each is hashed in both encodings, for **twelve distinct addresses per curve
+step**. `λ³ = 1`, so six is all of them; there is no seventh.
+
+| points searched | curve steps/s | addresses/s | ns/address |
+|---|---|---|---|
+| 1 — the point only | 248M | 495M | 2.01 |
+| 2 — plus its negation | 165M | 661M | 1.51 |
+| **6 — plus both endomorphisms** | **72M** | **865M** | **1.16** |
+
+The kernel reports which of the six matched; `src/gpu-vanity.js` turns that back
+into a private key. Nothing rests on that mapping being right — the address is
+re-derived from whichever key comes out and compared against the one that
+matched, so a wrong variant fails loudly instead of producing a key that does not
+own its address. `test/gpu.js` plants a published key and requires each of the
+six to be found and correctly attributed.
+
 ## Where the time goes
 
 Measured by differencing instrumented kernels — `-DPROFILE_STAGE=1|2|3` builds
 one that stops after the curve, one that stops after hashing, one that does
 everything. Each stage still consumes its result so the compiler cannot delete
-the work that produced it. 120 launches each, repeated, RTX 4070 SUPER, idle:
+the work that produced it. RTX 4070 SUPER, idle, repeated:
 
-| stage | ns/key | share |
+| stage | ns/address | share |
 |---|---|---|
-| elliptic curve — one affine addition + ⅛ of an inverse | 1.82 | **46%** |
-| hash160 ×2 — three SHA-256 blocks and two RIPEMD-160 | 2.10 | **53%** |
-| prefix range test | 0.06 | **1.6%** |
-| **total** | **3.95** | 253 Mkey/s, 507M addr/s |
+| elliptic curve — one affine addition + ⅛ inverse, over twelve addresses | 0.17 | **14%** |
+| hash160 — SHA-256 and RIPEMD-160 | 0.97 | **84%** |
+| prefix range test | 0.02 | **1.6%** |
+| **total** | **1.15** | 865M addr/s |
 
 The prefix test costing 1.6% is the whole argument for the range approach: the
 thing that would have been expensive — Base58 and a checksum per candidate — is
-not done at all.
+not done at all. Before the endomorphism the curve was 46% of the cost; it is
+now 14%, and the search is hash-bound.
 
-`-DHASH_FORMS=1|2|3` prices the two encodings separately:
+### What the numbers rule out
 
-| what is hashed | ns/key | ns/**address** |
-|---|---|---|
-| compressed only — one SHA block + RIPEMD | 2.95 | 2.95 |
-| uncompressed only — two SHA blocks + RIPEMD | 3.16 | 3.16 |
-| **both (what it does)** | 3.95 | **1.97** |
+Measured and rejected, so nobody spends a day rediscovering them:
 
-Two things fall out of that. The second SHA-256 block of the uncompressed key —
-one data byte and sixty-three bytes of padding — costs only 0.20 ns, so nvcc has
-already folded most of the constant schedule away and specialising it by hand is
-worth at most 5%. And hashing both encodings costs 2.13 ns where hashing them
-separately costs 2.47: the two chains are independent, so they interleave and
-hide each other's latency. Dropping the uncompressed form would make the search
-**33% slower per address**, not faster.
+| idea | result |
+|---|---|
+| specialise the uncompressed key's padding SHA-256 block | worth ≤5% — it costs 0.20 ns/key and nvcc already folds most of the constant schedule |
+| drop the uncompressed encoding | **33% slower per address** — the two chains are independent and hide each other's latency, so both together cost 2.13 ns where separately they cost 2.47 |
+| return the digest as words rather than bytes | no measurable change; nvcc already saw through the byte packing. Kept anyway, for being more direct |
 
-### Known headroom
-
-The curve is charged to one key but pays for two addresses, and it need not
-stop there. secp256k1 has an efficiently computable endomorphism: for
-`λ = 0x5363ad4c…` and `β = 0x7ae96a2b…`, the point `λP` is exactly
-`(β·x, y)` — a **single field multiplication** produces a second valid point,
-whose private key is `λk mod n`. Negation is cheaper still: `−P = (x, −y)`,
-private key `n − k`.
-
-So one curve step could yield P, −P, λP, −λP, λ²P and −λ²P — six points, twelve
-addresses — for the price of a handful of field operations instead of six
-inversions. The curve's 1.82 ns would amortise over twelve addresses rather than
-two, leaving the search hash-bound at its floor of about 1.06 ns/address.
-
-That is roughly **1.9x the current address rate**, and it is the only remaining
-change on the table worth that much. It is not implemented: every extra point
-needs its private key reconstructed on the host, and the identity has been
-verified against `src/secp256k1.js` but not yet built into the kernel.
+What is left is the hash itself, and SHA-256 and RIPEMD-160 are fixed by the
+address format. There is no seventh point and no cheaper digest; the search now
+sits at roughly 0.97 ns per hash160 pair with the curve almost free.
 
 ## Nothing is taken on trust
 

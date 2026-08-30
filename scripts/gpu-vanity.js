@@ -19,15 +19,17 @@ const gv = require('../src/gpu-vanity');
 const { difficulty, prefixRanges } = require('../src/vanity-range');
 const { validatePrefix } = require('../src/vanitygen');
 
-// The kernel checks BOTH the compressed and the uncompressed address of every
-// key, so one key is two chances at a match. Difficulty is quoted per address,
-// so estimates use the address rate; the live counter reports keys because that
-// is what the kernel counts. Every rate printed says which it is -- reporting a
-// key rate and an address rate as if they were the same number is confusing,
-// and off by exactly 2x.
-const ADDR_PER_KEY = 2;
-// Measured on this box: 253.8 Mkey/s = 507.6M addresses/s.
-const ADDR_PER_SEC = 507.6e6;
+// One curve step yields twelve addresses: six related points (the point, its
+// negation, and the two endomorphism images of each) in two encodings apiece.
+// See the BETA_ comment in cuda/vanity.cu.
+//
+// So "keys" and "addresses" are a factor of twelve apart, and every rate
+// printed says which it is. Difficulty is quoted per address, so estimates use
+// the address rate; the live counter reports keys, because curve steps are what
+// the kernel counts.
+const ADDR_PER_KEY = 12;
+// Measured on this box: 72.1 Mkey/s = 865M addresses/s.
+const ADDR_PER_SEC = 865e6;
 
 function usage(msg) {
   if (msg) console.error(`\n${msg}`);
@@ -130,8 +132,8 @@ async function main() {
     console.log(`    estimate     ${e.time} on the GPU`);
     if (e.scale) console.log(`    for scale    ${e.scale}`);
   }
-  console.log(`\nsearching ${ranges} range(s), both key encodings ` +
-              `(~254M keys/sec = ~507M addresses/sec)\n`);
+  console.log(`\nsearching ${ranges} range(s), 12 addresses per curve step ` +
+              `(~72M keys/sec = ~865M addresses/sec)\n`);
 
   const started = Date.now();
   const stored = [];

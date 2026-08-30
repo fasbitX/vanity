@@ -17,6 +17,37 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { deriveKeyPair } = require('./keys');
+const { N } = require('./secp256k1');
+
+/**
+ * secp256k1's endomorphism, host side.
+ *
+ * The kernel searches six related points per curve step, because each is nearly
+ * free once the first is known: lambda*P is (beta*x, y) for one field multiply,
+ * and -P is (x, -y) for a subtraction. It reports which one matched; this turns
+ * that back into a private key.
+ *
+ * lambda is a cube root of 1 modulo the group order, so lambda^3 == 1 and the
+ * six keys below are k, -k, lambda*k, -lambda*k, lambda^2*k and -lambda^2*k,
+ * all modulo n. Nothing rests on this being right: confirm() re-derives the
+ * address from whichever key comes out and compares it to the one the kernel
+ * matched, so a wrong variant fails loudly rather than producing a bad key.
+ */
+const LAMBDA = 0x5363ad4cc05c30e0a5261c028812645a122e22ea20816678df02967c1b23bd72n;
+const VARIANTS = 6;
+
+function variantKey(k, variant) {
+  const neg = (v) => (v === 0n ? 0n : N - v);
+  switch (variant) {
+    case 0: return k;
+    case 1: return neg(k);
+    case 2: return (LAMBDA * k) % N;
+    case 3: return neg((LAMBDA * k) % N);
+    case 4: return (LAMBDA * LAMBDA % N * k) % N;
+    case 5: return neg((LAMBDA * LAMBDA % N * k) % N);
+    default: throw new GpuVanityError(`kernel reported unknown variant ${variant}`);
+  }
+}
 const { hash160Bounds, difficulty } = require('./vanity-range');
 const { matchesPattern } = require('./vanitygen');
 
@@ -67,9 +98,13 @@ function writeRanges(prefixes, file) {
  * `form` says which of the two addresses the kernel matched -- a key produces a
  * different address in each encoding, and only one of them may carry the prefix.
  */
-function confirm({ privHex, form, h160, prefix, mode = 'prefix' }) {
-  const k = BigInt('0x' + privHex);
-  if (k <= 0n) throw new GpuVanityError(`kernel reported a zero private key`);
+function confirm({ privHex, form, h160, prefix, mode = 'prefix', variant = 0 }) {
+  const base = BigInt('0x' + privHex);
+  if (base <= 0n) throw new GpuVanityError('kernel reported a zero private key');
+  const k = variantKey(base, Number(variant));
+  if (k <= 0n || k >= N) {
+    throw new GpuVanityError(`variant ${variant} of ${privHex} is outside the curve order`);
+  }
   const derived = deriveKeyPair(k);
   const address = form === 'compressed' ? derived.addressCompressed : derived.addressUncompressed;
 
@@ -87,7 +122,7 @@ function confirm({ privHex, form, h160, prefix, mode = 'prefix' }) {
       `  src/keys.js  ${ourH160}`);
   }
 
-  return { key: derived, address, form, prefix, mode };
+  return { key: derived, address, form, prefix, mode, variant: Number(variant) };
 }
 
 /**
@@ -163,11 +198,11 @@ function runWith({
     if (!l.startsWith('HIT ')) return;
     if (stopping) return;
 
-    const [, privHex, form, h160, rangeIdx] = l.split(/\s+/);
+    const [, privHex, form, h160, rangeIdx, variant] = l.split(/\s+/);
     const prefix = prefixes[owner[Number(rangeIdx)]];
     let rec;
     try {
-      rec = confirm({ privHex, form, h160, prefix, mode });
+      rec = confirm({ privHex, form, h160, prefix, mode, variant: Number(variant || 0) });
     } catch (e) {
       errors.push(e);
       return stop();
@@ -223,6 +258,6 @@ function runWith({
 }
 
 module.exports = {
-  BIN, VANITY_FILE, GpuVanityError,
-  run, runWith, confirm, writeRanges, rangeOwners, difficulty,
+  BIN, VANITY_FILE, GpuVanityError, LAMBDA, VARIANTS,
+  run, runWith, confirm, variantKey, writeRanges, rangeOwners, difficulty,
 };

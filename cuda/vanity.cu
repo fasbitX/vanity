@@ -62,6 +62,37 @@
 __device__ __constant__ uint64_t TBL_X[GRP][4];   // x of 1G .. GRP*G
 __device__ __constant__ uint64_t TBL_Y[GRP][4];
 
+/**
+ * secp256k1's endomorphism, and why a curve step is worth six points.
+ *
+ * beta is a cube root of 1 mod p, lambda a cube root of 1 mod n, and they are
+ * linked: lambda*P is exactly (beta*x, y). So multiplying the x coordinate by a
+ * constant -- ONE field multiply -- produces another valid point on the curve,
+ * whose private key is lambda*k mod n. Doing it again with beta^2 produces a
+ * third. Negation is cheaper still: -P = (x, -y), private key n-k.
+ *
+ * That gives P, -P, lambda*P, -lambda*P, lambda^2*P and -lambda^2*P -- six
+ * points and twelve addresses -- from one affine addition and one modular
+ * inverse, instead of six of each. The curve was 46% of the run time when it
+ * paid for two addresses; here it pays for twelve.
+ *
+ * The host reconstructs the private key from the variant number, and then
+ * re-derives the address from it, so a mistake in any of this is caught rather
+ * than reported as a find. Verified against src/secp256k1.js in test/gpu.js.
+ */
+__device__ __constant__ uint64_t BETA_[4]  =
+  { 0xc1396c28719501eeULL, 0x9cf0497512f58995ULL,
+    0x6e64479eac3434e9ULL, 0x7ae96a2b657c0710ULL };
+__device__ __constant__ uint64_t BETA2_[4] =
+  { 0x3ec693d68e6afa40ULL, 0x630fb68aed0a766aULL,
+    0x919bb86153cbcb16ULL, 0x851695d49a83f8efULL };
+
+// How many of the six related points to search. 1 = the point only (what this
+// kernel did before), 2 = plus its negation, 6 = plus both endomorphisms.
+#ifndef VARIANTS
+#define VARIANTS 6
+#endif
+
 // Prefix bounds, big-endian 32-bit words, word 0 most significant. Both ends
 // inclusive. Constant memory: every thread reads the same few words, which is
 // the access pattern the constant cache is built for.
@@ -82,6 +113,7 @@ struct Hit {
   uint8_t  h160[20];
   uint32_t form;       // 0 = uncompressed, 1 = compressed
   uint32_t range;      // which prefix range matched
+  uint32_t variant;    // which of the six related points (see BETA_ above)
 };
 
 /**
@@ -114,7 +146,8 @@ __device__ __forceinline__ int range_of(const uint32_t w[5], uint32_t nRanges) {
  * local-memory round trip for every key that was never going to match.
  */
 __device__ __forceinline__ void record(Hit *hits, uint32_t *nHits, const uint64_t kk[4],
-                                       const uint32_t w[5], uint32_t form, int range) {
+                                       const uint32_t w[5], uint32_t form, int range,
+                                       uint32_t variant) {
   uint32_t slot = atomicAdd(nHits, 1u);
   if (slot >= MAX_HITS) return;
   #pragma unroll
@@ -128,6 +161,7 @@ __device__ __forceinline__ void record(Hit *hits, uint32_t *nHits, const uint64_
   }
   hits[slot].form = form;
   hits[slot].range = (uint32_t)range;
+  hits[slot].variant = variant;
 }
 
 __global__ void vanity_kernel(uint64_t *startX, uint64_t *startY,
@@ -202,50 +236,87 @@ __global__ void vanity_kernel(uint64_t *startX, uint64_t *startY,
       fe_sub(ny, ny, py);              // y3 = lambda(xP - x3) - yP
       fe_normalize(nx); fe_normalize(ny);
 
-      uint32_t hu[5], hc[5];
+      // One point in, six out. bx = beta*x and bx2 = beta^2*x are two more
+      // valid points at one field multiply each; nyn = -y gives each of them a
+      // negation for a subtraction. Twelve addresses from one inversion.
 #if PROFILE_STAGE >= 2
-#if HASH_FORMS == 1
-      hash160_point_be(nx, ny, true, hc);
-      #pragma unroll
-      for (int j = 0; j < 5; j++) hu[j] = hc[j];
-#elif HASH_FORMS == 2
-      hash160_point_be(nx, ny, false, hu);
-      #pragma unroll
-      for (int j = 0; j < 5; j++) hc[j] = hu[j];
+      fe nyn;
+#if VARIANTS >= 2
+      fe zero; fe_set_zero(zero);
+      fe_sub(nyn, zero, ny);
 #else
-      hash160_point_be(nx, ny, false, hu);
-      hash160_point_be(nx, ny, true,  hc);
+      nyn = ny;
 #endif
-#else
-      // Stage 1: no hashing. Fold the point in anyway so the curve arithmetic
-      // that produced it cannot be optimised away.
-      #pragma unroll
-      for (int j = 0; j < 5; j++) {
-        hu[j] = (uint32_t)nx.l[j % FE_LIMBS_N];
-        hc[j] = hu[j];
-      }
+#if VARIANTS >= 6
+      fe bx, bx2, bconst;
+      fe_from_u64(bconst, BETA_);
+      fe_mul(bx, nx, bconst);
+      fe_normalize(bx);
+      fe_from_u64(bconst, BETA2_);
+      fe_mul(bx2, nx, bconst);
+      fe_normalize(bx2);
+#endif
 #endif
 
       // key for this point is k + (i + 1)
       uint64_t kk[4] = {k[0], k[1], k[2], k[3]};
-      uint64_t add = (uint64_t)(i + 1), c = 0;
-      kk[0] = adc(kk[0], add, c);
-      kk[1] = adc(kk[1], 0, c);
-      kk[2] = adc(kk[2], 0, c);
-      kk[3] = adc(kk[3], 0, c);
+      {
+        uint64_t add = (uint64_t)(i + 1), c = 0;
+        kk[0] = adc(kk[0], add, c);
+        kk[1] = adc(kk[1], 0, c);
+        kk[2] = adc(kk[2], 0, c);
+        kk[3] = adc(kk[3], 0, c);
+      }
 
-      // Both encodings are searched. They are different addresses from the same
-      // key, so this doubles the addresses per key for the cost of a second
-      // hash160 -- and vanitygen only ever searched the uncompressed one.
 #if PROFILE_STAGE >= 3
-      int r = range_of(hu, nRanges);
-      if (r >= 0) record(hits, nHits, kk, hu, 0, r);
+      // One digest buffer, reused: keeping twelve of them live would spill.
+#define VG_TEST_POINT(XX, YY, VAR)                                    \
+      do {                                                            \
+        uint32_t h[5];                                                \
+        hash160_point_be(XX, YY, false, h);                           \
+        int r = range_of(h, nRanges);                                 \
+        if (r >= 0) record(hits, nHits, kk, h, 0, r, (VAR));          \
+        hash160_point_be(XX, YY, true, h);                            \
+        r = range_of(h, nRanges);                                     \
+        if (r >= 0) record(hits, nHits, kk, h, 1, r, (VAR));          \
+      } while (0)
 
-      r = range_of(hc, nRanges);
-      if (r >= 0) record(hits, nHits, kk, hc, 1, r);
+      VG_TEST_POINT(nx, ny, 0u);
+#if VARIANTS >= 2
+      VG_TEST_POINT(nx, nyn, 1u);
+#endif
+#if VARIANTS >= 6
+      VG_TEST_POINT(bx,  ny,  2u);
+      VG_TEST_POINT(bx,  nyn, 3u);
+      VG_TEST_POINT(bx2, ny,  4u);
+      VG_TEST_POINT(bx2, nyn, 5u);
+#endif
+#undef VG_TEST_POINT
+#elif PROFILE_STAGE == 2
+      // Hash without testing, so the hashing can be priced on its own.
+      uint32_t h[5], acc2 = 0;
+      hash160_point_be(nx, ny, false, h); acc2 |= h[0];
+      hash160_point_be(nx, ny, true,  h); acc2 |= h[0];
+#if VARIANTS >= 2
+      hash160_point_be(nx, nyn, false, h); acc2 |= h[0];
+      hash160_point_be(nx, nyn, true,  h); acc2 |= h[0];
+#endif
+#if VARIANTS >= 6
+      hash160_point_be(bx,  ny,  false, h); acc2 |= h[0];
+      hash160_point_be(bx,  ny,  true,  h); acc2 |= h[0];
+      hash160_point_be(bx,  nyn, false, h); acc2 |= h[0];
+      hash160_point_be(bx,  nyn, true,  h); acc2 |= h[0];
+      hash160_point_be(bx2, ny,  false, h); acc2 |= h[0];
+      hash160_point_be(bx2, ny,  true,  h); acc2 |= h[0];
+      hash160_point_be(bx2, nyn, false, h); acc2 |= h[0];
+      hash160_point_be(bx2, nyn, true,  h); acc2 |= h[0];
+#endif
+      if (acc2 == 0xffffffffu) atomicAdd(nHits, 0u);
 #else
-      // Stages 1-2: no range test, but consume the digest so it survives.
-      if ((hu[0] | hc[0]) == 0xffffffffu && hu[4] == 0xffffffffu) atomicAdd(nHits, 0u);
+      // Stage 1: no hashing at all. Consume the point so the curve arithmetic
+      // that produced it cannot be optimised away.
+      if ((uint32_t)nx.l[0] == 0xffffffffu && (uint32_t)ny.l[0] == 0xffffffffu)
+        atomicAdd(nHits, 0u);
 #endif
 
       localKeys++;
@@ -395,7 +466,7 @@ int main(int argc, char **argv) {
         for (int j = 3; j >= 0; j--) printf("%016llx", (unsigned long long)hHits[i].k[j]);
         printf(" %s ", hHits[i].form ? "compressed" : "uncompressed");
         for (int j = 0; j < 20; j++) printf("%02x", hHits[i].h160[j]);
-        printf(" %u\n", hHits[i].range);
+        printf(" %u %u\n", hHits[i].range, hHits[i].variant);
       }
       // Say so rather than silently dropping: an easy prefix can outrun the
       // buffer, and a quiet truncation would look like a slow search.

@@ -19,6 +19,7 @@ const os = require('os');
 const path = require('path');
 const gv = require('../src/gpu-vanity');
 const { buildSeeds } = require('../scripts/seed');
+const { deriveKeyPair } = require('../src/keys');
 
 let passed = 0;
 const checkAsync = async (name, fn) => {
@@ -65,6 +66,49 @@ const WIKI = {
     for (const m of r.found) {
       assert.ok(m.address.startsWith('1Btc'), `${m.address} lacks the prefix`);
     }
+  });
+
+  // --- the endomorphism ------------------------------------------------------
+  //
+  // The kernel searches six related points per curve step -- P, -P, and the two
+  // endomorphism images of each -- because they cost a field multiply rather
+  // than an inversion. It reports which one matched and the host turns that
+  // back into a private key. If that mapping is wrong the kernel still finds
+  // things; it just reports keys that do not own the addresses found, which is
+  // the worst failure this program has. So each of the six is exercised
+  // separately, against a published key.
+
+  console.log('\nGPU, each endomorphism variant');
+
+  for (let v = 0; v < 6; v++) {
+    await checkAsync(`variant ${v} is found and attributed to the right key`, async () => {
+      const expectKey = gv.variantKey(BigInt('0x' + WIKI.privHex), v);
+      const expect = deriveKeyPair(expectKey);
+      // Search for the address this variant produces, and plant the BASE key.
+      // The kernel only ever walks to the base point; everything else has to
+      // come out of the endomorphism.
+      const prefix = expect.addressUncompressed.slice(0, 8);
+      const r = await runPlanted(prefix, WIKI.privHex, 60000);
+
+      const hit = r.found.find((m) => m.address === expect.addressUncompressed);
+      assert.ok(hit, `variant ${v}: ${expect.addressUncompressed} was not found ` +
+                     `(got ${r.found.length} other matches)`);
+      assert.strictEqual(hit.key.privateKeyHex, expect.privateKeyHex,
+        `variant ${v}: reported a key that does not own the address`);
+      assert.strictEqual(hit.variant, v, `variant ${v}: attributed to variant ${hit.variant}`);
+    });
+  }
+
+  await checkAsync('the six variants really are six different addresses', async () => {
+    // If two variants collided the speed-up would be a lie -- twelve addresses
+    // per curve step is only worth anything if they are distinct.
+    const seen = new Set();
+    for (let v = 0; v < 6; v++) {
+      const d = deriveKeyPair(gv.variantKey(BigInt('0x' + WIKI.privHex), v));
+      seen.add(d.addressUncompressed);
+      seen.add(d.addressCompressed);
+    }
+    assert.strictEqual(seen.size, 12, `expected 12 distinct addresses, got ${seen.size}`);
   });
 
   summary();
