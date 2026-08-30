@@ -302,11 +302,14 @@ __device__ __forceinline__ void hash160_point_be(const fe &x, const fe &y,
     for (int k = 9; k < 16; k++) w[k] = (y32[k-9] << 24) | (y32[k-8] >> 8);
     sha256_block(st, w);
 
+#ifndef SKIP_PAD_BLOCK
     w[0] = (y32[7] << 24) | 0x00800000u;   // last y byte, then padding
     #pragma unroll
     for (int k = 1; k < 15; k++) w[k] = 0;
     w[15] = 520;                           // 65 bytes in bits
     sha256_block(st, w);
+#endif   // measurement only: skipping this gives a wrong digest, but prices
+         // the second block, which carries one data byte and 63 of padding
   }
 
   // The digest is big-endian words; RIPEMD wants little-endian.

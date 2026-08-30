@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.2.1
+
+**SHA-256 audited for the same fault as RIPEMD; it does not have it.** Both
+loops are fully unrolled, `w[i]` and `SHA_K[i]` are compile-time indices, and
+the round loop has no branch. The SASS shows no local-memory traffic from it.
+
+**Corrects an earlier claim.** The uncompressed key's second SHA-256 block —
+one data byte and sixty-three of padding — was recorded as cheap "because nvcc
+already folds the constant schedule". It does not. Measured by skipping it, the
+six of them cost **1.27 ns/step, 13.6% of the run**, and a padding block costs
+the same as a full one. The schedule folds; the sixty-four rounds do not, and
+they are the bulk. Still not worth specialising, but for the opposite reason.
+
+Two more results recorded:
+
+- Deriving β²x in place from βx cut spilling 40% (264 → 160 bytes) and did not
+  move the rate at all. **The kernel is not spill-bound** — reverted.
+- Dropping the uncompressed encoding is still a loss, 0.88 ns/address against
+  0.78, but the margin narrowed from 33% to 11% once RIPEMD got cheaper.
+
+Adds `-DSKIP_PAD_BLOCK` and `-DFORMS=1` measurement knobs, and removes a
+`HASH_FORMS` knob that had become dead code when the inner loop was rewritten
+for the endomorphism — it was still accepted on the command line and silently
+did nothing, which produced one flatly wrong measurement before it was noticed.
+
 ## 1.2.0
 
 **One `#pragma` was worth 44%: 859 → 1287M addresses/sec.**

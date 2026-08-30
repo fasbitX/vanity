@@ -34,14 +34,11 @@
 #define GRP 8
 #endif
 
-// Measurement only: which public-key encodings to hash.
-//   1 = compressed only   (33 bytes -> ONE SHA-256 block + RIPEMD)
-//   2 = uncompressed only (65 bytes -> TWO SHA-256 blocks + RIPEMD)
-//   3 = both (default, what the search actually does)
-// Differencing 1 and 2 prices the second SHA block of the uncompressed form,
-// which carries one data byte and sixty-three bytes of padding.
-#ifndef HASH_FORMS
-#define HASH_FORMS 3
+// Measurement only: 2 = both public-key encodings (what the search does),
+// 1 = compressed only, which halves the addresses per curve step but skips the
+// 65-byte form's second SHA-256 block.
+#ifndef FORMS
+#define FORMS 2
 #endif
 
 // Profiling levels: 1 = curve only, 2 = + hash160, 3 = full pipeline.
@@ -307,11 +304,14 @@ __global__ void vanity_kernel(uint64_t *startX, uint64_t *startY,
 #define VG_TEST_POINT(XX, YY, VAR)                                    \
       do {                                                            \
         uint32_t h[5];                                                \
-        hash160_point_be(XX, YY, false, h);                           \
-        int r = range_of(h, nRanges, sorted);                                 \
-        if (r >= 0) record(hits, nHits, kk, h, 0, r, (VAR));          \
+        int r;                                                        \
+        if (FORMS == 2) {                                             \
+          hash160_point_be(XX, YY, false, h);                         \
+          r = range_of(h, nRanges, sorted);                           \
+          if (r >= 0) record(hits, nHits, kk, h, 0, r, (VAR));        \
+        }                                                             \
         hash160_point_be(XX, YY, true, h);                            \
-        r = range_of(h, nRanges, sorted);                                     \
+        r = range_of(h, nRanges, sorted);                             \
         if (r >= 0) record(hits, nHits, kk, h, 1, r, (VAR));          \
       } while (0)
 

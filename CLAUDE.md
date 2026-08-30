@@ -69,6 +69,13 @@ npm run test:all
   count was worth **44%** (859 → 1287M addr/s). Full unroll or nothing: partial
   unrolls at 20 and 40 measured 843M and 758M. It wins while spilling 164 bytes,
   so do not tune on spill counts — measure wall-clock.
+- **Do not tune on spill counts.** The RIPEMD unroll fix is 44% faster while
+  spilling 164 bytes the old build did not, and separately, cutting spilling by
+  40% (deriving β²x in place) moved the rate not at all. Measure wall-clock.
+- **A measurement knob that silently does not apply is worse than none.** A
+  `-DFORMS=1` build once measured identical to the default because the edit
+  adding the flag had not matched -- the flag was doing nothing and the
+  "result" was the default kernel twice. Check the binaries differ.
 - **Already measured and rejected** (see README "What the numbers rule out"):
   specialising the uncompressed padding SHA block (≤5%, nvcc already folds it),
   dropping the uncompressed encoding (33% SLOWER per address -- the two hash

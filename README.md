@@ -166,61 +166,39 @@ a reminder that spill counts are not the thing to optimise, wall-clock is.
 Partial unrolls are worse than either extreme: at 20 and 40 the tables stay in
 constant memory and it runs at 843M and 758M.
 
+### SHA-256 is clean; its cost is the rounds
+
+After the RIPEMD result the same question was asked of SHA-256, which is now the
+largest line at 42%. It has none of the same problem: both loops are fully
+unrolled, `w[i]` and `SHA_K[i]` are compile-time indices, and the round loop
+contains no branch at all. The generated SASS shows no local-memory traffic from
+it.
+
+What it does have is the 65-byte uncompressed key needing **two** blocks, the
+second carrying one data byte and sixty-three of padding. Measured by skipping
+it: those six blocks cost **1.27 ns per curve step, 13.6% of the run** — and a
+padding block costs essentially the same as a full one, 0.21 ns against 0.22.
+
+That corrects an earlier note here which said the padding block was cheap
+because nvcc had folded it. It has not, and it cannot: the message *schedule*
+folds, but all sixty-four **rounds** still have to run whatever the message
+words are, and the rounds are the bulk of a block. Specialising it further is
+worth very little.
+
 ### What the numbers rule out
 
 Measured and rejected, so nobody spends a day rediscovering them:
 
 | idea | result |
 |---|---|
-| rolling 16-word SHA-256 schedule instead of `w[64]` | no change, tried twice. nvcc already does that liveness analysis; registers went *up* 238 → 242 |
-| specialise the uncompressed key's padding SHA-256 block | ≤5% — it costs 0.20 ns/key and nvcc already folds most of the constant schedule |
-| drop the uncompressed encoding | **33% slower per address** — the two chains are independent and hide each other's latency |
+| rolling 16-word SHA-256 schedule instead of `w[64]` | no change, tried twice. nvcc already does that liveness analysis; registers went *up*, 238 → 242 |
+| specialise the uncompressed key's padding SHA-256 block | it is 13.6% of the run, but almost all of that is the 64 rounds, which run regardless. Only the schedule folds |
+| cut register pressure by deriving β²x in place from βx | spilling fell 40% (264 → 160 bytes) and the rate did not move. **The kernel is not spill-bound** |
+| drop the uncompressed encoding | still worse: 0.88 ns/address against 0.78, an 11% loss. The margin was 33% before the RIPEMD fix, so this is closer than it was — but it is still a loss |
 | return the digest as words rather than bytes | no measurable change; nvcc already saw through the byte packing. Kept for being more direct |
 
-What is left is the two hash functions themselves, which are fixed by the
-address format. SHA-256 is now the largest single line at 42%.
-
-### Two searches on one card halve each other
-
-They do not queue, they interleave, and neither says so. The run looks healthy
-and the rate is quietly divided — which is easy to mistake for the change you
-were about to measure. `npm run gpu` now lists any other process on the device
-before it starts and repeats the caveat next to the final number.
-
-On an idle card the rate is flat, so a long search does not decay: 863–880M
-addr/s sampled over 100 seconds, 2745 MHz, 148 W, 68 °C, no throttling.
-
-### Many patterns at once
-
-The range test runs twelve times per curve step, once per address, so its cost
-scales with the number of ranges. A linear scan made sixteen prefixes cost 14%
-of the run where one cost 0.9%.
-
-Ranges are sorted by lower bound on the host, so the kernel bisects: the only
-candidate is the last range whose lower bound is at or below the value.
-
-| ranges | linear scan | bisecting |
-|---|---|---|
-| 2 (one prefix) | 864M addr/s | 859M |
-| 29 (sixteen prefixes) | 752M addr/s | **849M** |
-
-Bisection needs disjoint ranges, and prefixes nest — every `1Btcoin` address is
-also a `1Btc` address. The host detects overlap and tells the kernel to scan
-linearly instead, which is correct whatever the arrangement.
-
-### What the numbers rule out
-
-Measured and rejected, so nobody spends a day rediscovering them:
-
-| idea | result |
-|---|---|
-| specialise the uncompressed key's padding SHA-256 block | worth ≤5% — it costs 0.20 ns/key and nvcc already folds most of the constant schedule |
-| drop the uncompressed encoding | **33% slower per address** — the two chains are independent and hide each other's latency, so both together cost 2.13 ns where separately they cost 2.47 |
-| return the digest as words rather than bytes | no measurable change; nvcc already saw through the byte packing. Kept anyway, for being more direct |
-
-What is left is the hash itself, and SHA-256 and RIPEMD-160 are fixed by the
-address format. There is no seventh point and no cheaper digest; the search now
-sits at roughly 0.97 ns per hash160 pair with the curve almost free.
+What is left is the two hash functions themselves, fixed by the address format,
+and the rounds inside them are irreducible.
 
 ## Nothing is taken on trust
 
