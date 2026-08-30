@@ -121,6 +121,74 @@ const WIKI = {
     assert.strictEqual(seen.size, 12, `expected 12 distinct addresses, got ${seen.size}`);
   });
 
+  // --- many patterns at once -------------------------------------------------
+
+  console.log('\nGPU, several patterns in one run');
+
+  await checkAsync('finds each of several prefixes, and attributes them right', async () => {
+    // Sorting the ranges to allow bisection permutes them, so the range index
+    // the kernel reports no longer lines up with the order the prefixes were
+    // given. If that mapping slipped, matches would come back labelled with
+    // somebody else's pattern.
+    const prefixes = ['1Btcz', '1Satz', '1zzQ'];
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpu-vanity-multi-'));
+    try {
+      const start = path.join(dir, 'start.bin');
+      const ranges = path.join(dir, 'ranges.bin');
+      buildSeeds(56 * 256, start);
+      gv.writeRanges(prefixes, ranges);
+      const { found } = await gv.runWith({
+        prefixes, startFile: start, rangeFile: ranges,
+        blocks: 56, threads: 256, maxMatches: 12, timeoutMs: 120000, resultFile: null,
+      }).done;
+
+      assert.ok(found.length > 0, 'no matches for three easy prefixes');
+      for (const m of found) {
+        assert.ok(prefixes.includes(m.prefix), `unknown prefix ${m.prefix}`);
+        assert.ok(m.address.startsWith(m.prefix),
+          `${m.address} was reported for ${m.prefix}, which it does not start with`);
+      }
+      // and each prefix should turn up, given twelve matches over three easy ones
+      const seen = new Set(found.map((m) => m.prefix));
+      assert.ok(seen.size >= 2, `only ${seen.size} of 3 prefixes matched in 12 hits`);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await checkAsync('nested prefixes still match, on the linear path', async () => {
+    // "1Btcz" contains "1Btczz", so the ranges overlap and bisection would be
+    // wrong -- the host must have told the kernel to scan linearly. The outer
+    // prefix has to keep matching addresses that are not in the inner one.
+    const prefixes = ['1Btcz', '1Btczz'];
+    assert.strictEqual(gv.buildRanges(prefixes).disjoint, false,
+      'these prefixes were expected to overlap');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpu-vanity-nest-'));
+    try {
+      const start = path.join(dir, 'start.bin');
+      const ranges = path.join(dir, 'ranges.bin');
+      buildSeeds(56 * 256, start);
+      gv.writeRanges(prefixes, ranges);
+      const { found } = await gv.runWith({
+        prefixes, startFile: start, rangeFile: ranges,
+        blocks: 56, threads: 256, maxMatches: 20, timeoutMs: 120000, resultFile: null,
+      }).done;
+
+      assert.ok(found.length > 0, 'no matches for nested prefixes');
+      for (const m of found) {
+        assert.ok(m.address.startsWith(m.prefix),
+          `${m.address} reported for ${m.prefix}`);
+      }
+      // The outer prefix is ~58x commoner, so plain "1Btcz" hits must appear;
+      // if bisection had been used they would have been swallowed.
+      assert.ok(found.some((m) => !m.address.startsWith('1Btczz')),
+        'only inner-prefix matches came back -- the outer range was being skipped');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   summary();
 })();
 

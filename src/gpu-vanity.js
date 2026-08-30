@@ -89,39 +89,68 @@ function gpuTenants() {
     .filter((t) => Number.isFinite(t.pid) && t.pid !== process.pid);
 }
 
+/** Five big-endian words back to one number, for sorting and overlap checks. */
+const wordsToBig = (w) => Array.from(w).reduce((a, x) => (a << 32n) | BigInt(x), 0n);
+
 /**
- * Which prefix each range index belongs to. The kernel reports a range number;
- * a caller wants the pattern. A prefix can contribute more than one range.
+ * The ranges the kernel will hold, in the order it will hold them.
+ *
+ * Sorted by lower bound, so the kernel can bisect instead of walking every
+ * range for every address. That matters once there is more than one pattern:
+ * the test costs 0.9% of the run for a single prefix and 14% for sixteen,
+ * because a linear scan is O(ranges) per address and there are 12 addresses per
+ * curve step.
+ *
+ * Bisection is only valid if the ranges are disjoint, and they are not always:
+ * "1Btc" and "1Btcoin" nest, since every 1Btcoin address is also a 1Btc
+ * address. Overlap is detected here and the kernel is told to fall back to the
+ * linear scan, which is correct for any arrangement.
  */
-function rangeOwners(prefixes) {
-  const owner = [];
+function buildRanges(prefixes) {
+  const rows = [];
   prefixes.forEach((p, pi) => {
-    for (let i = 0; i < hash160Bounds(p).length; i++) owner.push(pi);
+    for (const b of hash160Bounds(p)) {
+      rows.push({ lo: b.lo, hi: b.hi, owner: pi, loN: wordsToBig(b.lo), hiN: wordsToBig(b.hi) });
+    }
   });
-  return owner;
+  rows.sort((a, b) => (a.loN < b.loN ? -1 : a.loN > b.loN ? 1 : 0));
+
+  let disjoint = true;
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i].loN <= rows[i - 1].hiN) { disjoint = false; break; }
+  }
+  return { rows, owners: rows.map((r) => r.owner), disjoint };
 }
 
 /**
- * Ranges file: uint32 count, then per range five big-endian lo words and five
- * hi words.
+ * Which prefix each range index belongs to. The kernel reports a range number;
+ * a caller wants the pattern. Must agree with the order writeRanges() wrote.
+ */
+function rangeOwners(prefixes) {
+  return buildRanges(prefixes).owners;
+}
+
+/**
+ * Ranges file: uint32 count, uint32 flags (bit 0 = sorted and disjoint, so the
+ * kernel may bisect), then per range five big-endian lo words and five hi words.
  */
 function writeRanges(prefixes, file) {
-  const rows = [];
-  for (const p of prefixes) rows.push(...hash160Bounds(p));
+  const { rows, owners, disjoint } = buildRanges(prefixes);
   if (rows.length === 0) throw new GpuVanityError('no searchable ranges');
   if (rows.length > 32) {
     throw new GpuVanityError(
       `${prefixes.length} prefixes need ${rows.length} ranges; the kernel holds 32`);
   }
-  const buf = Buffer.alloc(4 + rows.length * 40);
+  const buf = Buffer.alloc(8 + rows.length * 40);
   buf.writeUInt32LE(rows.length, 0);
+  buf.writeUInt32LE(disjoint ? 1 : 0, 4);
   rows.forEach((r, i) => {
-    const off = 4 + i * 40;
+    const off = 8 + i * 40;
     for (let w = 0; w < 5; w++) buf.writeUInt32LE(r.lo[w], off + w * 4);
     for (let w = 0; w < 5; w++) buf.writeUInt32LE(r.hi[w], off + 20 + w * 4);
   });
   fs.writeFileSync(file, buf);
-  return rangeOwners(prefixes);
+  return owners;
 }
 
 /**
@@ -291,5 +320,5 @@ function runWith({
 
 module.exports = {
   BIN, VANITY_FILE, GpuVanityError, LAMBDA, VARIANTS, gpuTenants,
-  run, runWith, confirm, variantKey, writeRanges, rangeOwners, difficulty,
+  run, runWith, confirm, variantKey, writeRanges, rangeOwners, buildRanges, difficulty,
 };

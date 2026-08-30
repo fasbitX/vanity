@@ -116,60 +116,27 @@ struct Hit {
   uint32_t variant;    // which of the six related points (see BETA_ above)
 };
 
-/** Three-way compare of two 160-bit values held as five big-endian words. */
-__device__ __forceinline__ int cmp160(const uint32_t a[5], const uint32_t b[5]) {
-  for (int i = 0; i < 5; i++) {
-    if (a[i] != b[i]) return a[i] > b[i] ? 1 : -1;
-  }
-  return 0;
-}
-
 /**
- * Which range contains this hash160, or -1. Correct for any arrangement of
- * ranges, including nested ones ("1Btc" contains "1Btcoin").
+ * Which range contains this hash160, or -1.
  *
- * O(ranges) per address, and there are twelve addresses per curve step, so this
- * is what makes many patterns expensive: measured at 0.9% of the run for one
- * prefix and 14% for sixteen.
+ * Not unrolled on purpose: the comparison almost always decides on the first
+ * word, so the early return is the whole point. Unrolling it into a branchless
+ * 160-bit compare would make the common case slower, not faster.
  */
-__device__ __forceinline__ int range_of_linear(const uint32_t w[5], uint32_t nRanges) {
+__device__ __forceinline__ int range_of(const uint32_t w[5], uint32_t nRanges) {
   for (uint32_t r = 0; r < nRanges; r++) {
-    if (cmp160(w, R_LO[r]) >= 0 && cmp160(w, R_HI[r]) <= 0) return (int)r;
+    int cmp = 0;
+    for (int i = 0; i < 5; i++) {
+      if (w[i] != R_LO[r][i]) { cmp = w[i] > R_LO[r][i] ? 1 : -1; break; }
+    }
+    if (cmp < 0) continue;                       // below the range
+    cmp = 0;
+    for (int i = 0; i < 5; i++) {
+      if (w[i] != R_HI[r][i]) { cmp = w[i] > R_HI[r][i] ? 1 : -1; break; }
+    }
+    if (cmp <= 0) return (int)r;                 // within [lo, hi]
   }
   return -1;
-}
-
-/**
- * The same answer by bisection, valid when the ranges are sorted by lower bound
- * and do not overlap.
- *
- * Disjoint and sorted means there is only ever one candidate: the last range
- * whose lower bound is at or below the value. Find it in log2(n) comparisons
- * and check its upper bound, rather than walking all n. The host decides which
- * of these two the kernel gets -- see buildRanges() in src/gpu-vanity.js.
- */
-__device__ __forceinline__ int range_of_sorted(const uint32_t w[5], uint32_t nRanges) {
-  uint32_t lo = 0, hi = nRanges;          // hi exclusive
-  while (lo < hi) {
-    uint32_t mid = (lo + hi) >> 1;
-    if (cmp160(w, R_LO[mid]) >= 0) lo = mid + 1; else hi = mid;
-  }
-  if (lo == 0) return -1;                 // below every range
-  uint32_t r = lo - 1;
-  return cmp160(w, R_HI[r]) <= 0 ? (int)r : -1;
-}
-
-/**
- * Bisection wins from about four ranges up; below that its setup costs more
- * than the comparisons it saves, and a single prefix -- the common case -- was
- * measurably (0.7%) worse for it. So take the scan when the list is short.
- */
-#define BISECT_FROM 5
-
-__device__ __forceinline__ int range_of(const uint32_t w[5], uint32_t nRanges,
-                                        uint32_t sorted) {
-  if (sorted && nRanges >= BISECT_FROM) return range_of_sorted(w, nRanges);
-  return range_of_linear(w, nRanges);
 }
 
 /**
@@ -199,8 +166,7 @@ __device__ __forceinline__ void record(Hit *hits, uint32_t *nHits, const uint64_
 
 __global__ void vanity_kernel(uint64_t *startX, uint64_t *startY,
                               uint64_t *startK, uint32_t groups, uint32_t nRanges,
-                              uint32_t sorted, Hit *hits, uint32_t *nHits,
-                              uint64_t *keysDone) {
+                              Hit *hits, uint32_t *nHits, uint64_t *keysDone) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
   fe px, py;
@@ -308,10 +274,10 @@ __global__ void vanity_kernel(uint64_t *startX, uint64_t *startY,
       do {                                                            \
         uint32_t h[5];                                                \
         hash160_point_be(XX, YY, false, h);                           \
-        int r = range_of(h, nRanges, sorted);                                 \
+        int r = range_of(h, nRanges);                                 \
         if (r >= 0) record(hits, nHits, kk, h, 0, r, (VAR));          \
         hash160_point_be(XX, YY, true, h);                            \
-        r = range_of(h, nRanges, sorted);                                     \
+        r = range_of(h, nRanges);                                     \
         if (r >= 0) record(hits, nHits, kk, h, 1, r, (VAR));          \
       } while (0)
 
@@ -422,11 +388,8 @@ int main(int argc, char **argv) {
   // order within each bound, written by scripts/gpu-vanity.js.
   FILE *f = fopen(rangePath, "rb");
   if (!f) { fprintf(stderr, "cannot open %s\n", rangePath); return 1; }
-  uint32_t nRanges = 0, sorted = 0;
-  if (fread(&nRanges, sizeof(uint32_t), 1, f) != 1 ||
-      fread(&sorted, sizeof(uint32_t), 1, f) != 1) {
-    fprintf(stderr, "range file truncated\n"); return 1;
-  }
+  uint32_t nRanges = 0;
+  if (fread(&nRanges, sizeof(uint32_t), 1, f) != 1) { fprintf(stderr, "range file truncated\n"); return 1; }
   if (nRanges == 0 || nRanges > MAX_RANGES) {
     fprintf(stderr, "range file has %u ranges, need 1..%d\n", nRanges, MAX_RANGES); return 1;
   }
@@ -478,18 +441,15 @@ int main(int argc, char **argv) {
   CK(cudaMalloc(&dKeys, sizeof(uint64_t)), "dKeys");
   CK(cudaMemset(dN, 0, sizeof(uint32_t)), "memset dN");
 
-  fprintf(stderr, "gpu: %s, %d SMs, %d blocks x %d threads = %d threads, "
-                  "%u range(s), %s lookup\n",
-          prop.name, prop.multiProcessorCount, blocks, threads, nThreads, nRanges,
-          sorted ? "bisecting" : "linear");
+  fprintf(stderr, "gpu: %s, %d SMs, %d blocks x %d threads = %d threads, %u range(s)\n",
+          prop.name, prop.multiProcessorCount, blocks, threads, nThreads, nRanges);
   fflush(stderr);
 
   Hit hHits[MAX_HITS];
   uint64_t total = 0;
   for (long long round = 0; maxRounds < 0 || round < maxRounds; round++) {
     CK(cudaMemset(dKeys, 0, sizeof(uint64_t)), "memset keys");
-    vanity_kernel<<<blocks, threads>>>(dX, dY, dK, groups, nRanges, sorted,
-                                      dHits, dN, dKeys);
+    vanity_kernel<<<blocks, threads>>>(dX, dY, dK, groups, nRanges, dHits, dN, dKeys);
     CK(cudaGetLastError(), "launch");
     CK(cudaDeviceSynchronize(), "sync");
 

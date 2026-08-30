@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.1.2
+
+**Searching many patterns at once no longer costs 13%.** The range test is run
+twelve times per curve step, once per address, and it was a linear scan over
+every range. One prefix cost 0.9% of the run; sixteen cost 14%.
+
+Ranges are now sorted by lower bound on the host, so the kernel bisects instead
+of walking: the only candidate is the last range whose lower bound is at or
+below the value. Measured, interleaved against the previous kernel:
+
+| ranges | before | after |
+|---|---|---|
+| 2 (one prefix) | 864M addr/s | 859M (−0.6%) |
+| 29 (sixteen prefixes) | 752M addr/s | **849M (+12.9%)** |
+
+Bisection is only valid on disjoint ranges, and prefixes can nest — every
+`1Btcoin` address is also a `1Btc` address. Overlap is detected on the host and
+the kernel is told to fall back to the linear scan, which is correct for any
+arrangement. Below five ranges the scan is used anyway, since bisection's setup
+costs more than it saves there.
+
+The 0.6% on the single-prefix case is real, not noise, and is the price of the
+extra branch. Sixteen patterns getting 12.9% back is worth it.
+
+Two new gates: several prefixes in one run must each be found *and* attributed
+to the right pattern (sorting permutes the ranges, so the index the kernel
+reports no longer matches the order the prefixes were given), and nested
+prefixes must still match on the linear path.
+
 ## 1.1.1
 
 **Warn when the GPU is already busy.** Two searches on one card do not queue,

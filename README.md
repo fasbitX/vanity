@@ -152,6 +152,24 @@ before it starts and repeats the caveat next to the final number.
 On an idle card the rate is flat, so a long search does not decay: 863–880M
 addr/s sampled over 100 seconds, 2745 MHz, 148 W, 68 °C, no throttling.
 
+### Many patterns at once
+
+The range test runs twelve times per curve step, once per address, so its cost
+scales with the number of ranges. A linear scan made sixteen prefixes cost 14%
+of the run where one cost 0.9%.
+
+Ranges are sorted by lower bound on the host, so the kernel bisects: the only
+candidate is the last range whose lower bound is at or below the value.
+
+| ranges | linear scan | bisecting |
+|---|---|---|
+| 2 (one prefix) | 864M addr/s | 859M |
+| 29 (sixteen prefixes) | 752M addr/s | **849M** |
+
+Bisection needs disjoint ranges, and prefixes nest — every `1Btcoin` address is
+also a `1Btc` address. The host detects overlap and tells the kernel to scan
+linearly instead, which is correct whatever the arrangement.
+
 ### What the numbers rule out
 
 Measured and rejected, so nobody spends a day rediscovering them:
