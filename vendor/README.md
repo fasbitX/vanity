@@ -30,6 +30,7 @@ change; the short version:
 | local `BN_MASK2` | moved into OpenSSL's private headers |
 | `pcre1compat.h` | PCRE1 is end-of-life and gone from Ubuntu 24.04 |
 | `start_threads()` joins its workers | **crash fix**, see below |
+| `get_prefix_ranges()` walks candidate lengths | **matching fix**, see below |
 
 The thread fix is not cosmetic. vanitygen never joined its worker threads, so
 `main()` returned while they were still hashing. Under OpenSSL 1.0 that was
@@ -38,6 +39,25 @@ context under a lock, so a worker still running when `exit()` triggers
 `OPENSSL_cleanup()` dereferences a freed lock and the process dies — *after*
 printing a match, about one run in three on this machine. That is the shape of
 bug that gets written off as "it worked, the shell just looked odd".
+
+### It could not find some addresses at all
+
+A prefix pins the address number to `v * 58^e .. (v+1) * 58^e - 1` for whichever
+Base58 rendering length it is read at, and the eight-bit byte window the leading
+`1`s imply admits more than one length. `get_prefix_ranges()` picked a fixed
+pair; when the longer of the two lay entirely above the ceiling it dropped that
+one, returned a single range, and never looked one length further down.
+
+With exactly three leading `1`s that loses about 1.7% of the matching addresses.
+Those ranges are what `vg_prefix_test()` compares against, so the addresses were
+not merely under-counted in the reported difficulty — they were never found.
+
+Demonstrated, not asserted: with the prefix `1112`, where the missing interval
+is 8% of the total, a 45-second run now returns 293 addresses of which **20 lie
+in the interval vanitygen previously could not reach**, and none lie outside
+either. Difficulty agreement with `src/vanity-range.js` went from 54/75 prefixes
+to 113/116; the three that still differ are `double` rounding in
+`vg_prefix_get_difficulty()` above 2^53, not the ranges.
 
 ### What is not patched
 
@@ -50,6 +70,5 @@ than a clean failure. Porting it properly means going through
 `BN_MONT_CTX` — a rewrite, not a fix.
 
 There is little reason to want it here. vanitygen's OpenCL engine is 2013-era;
-this project already has a CUDA pipeline doing 249M keys/sec, and adding prefix
-matching to `cuda/hunt.cu` would beat it by a wide margin. See "GPU vanity
-search" in the top-level README.
+`cuda/vanity.cu` replaces it and is far faster than that engine ever was --
+253.8M keys/sec, 507.6M addresses/sec. See the top-level README.
