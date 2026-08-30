@@ -1,0 +1,60 @@
+# Changelog
+
+## 1.1.0
+
+**Twelve addresses per curve step — 495M → 865M addresses/sec (1.75x).**
+
+The expensive part of the search was never hashing an address, it was getting a
+point to hash: an affine addition needs a modular inverse. secp256k1's
+endomorphism gives five more points almost free — `λP` is exactly `(β·x, y)`,
+one field multiply, and `−P = (x, −y)` is a subtraction. One inversion now buys
+six points, each hashed in both encodings.
+
+The curve was 46% of the run time and is now 14%; the search is hash-bound,
+which is the floor for this problem. `λ³ = 1`, so six is all of them.
+
+- The kernel reports which of the six matched and the host reconstructs the
+  private key from it. `confirm()` re-derives the address from that key and
+  compares it against the one that matched, so a wrong variant fails loudly
+  rather than reporting a key that does not own its address.
+- `test/gpu.js` plants a published key and requires each of the six variants to
+  be found *and* correctly attributed, and asserts the twelve addresses really
+  are distinct.
+
+**Profiling, and what it rules out.** `-DPROFILE_STAGE=1|2|3`,
+`-DHASH_FORMS=1|2|3` and `-DVARIANTS=1|2|6` build instrumented kernels. Three
+ideas were measured and rejected: specialising the uncompressed key's padding
+SHA-256 block (≤5%, nvcc already folds it), dropping the uncompressed encoding
+(33% *slower* per address), and returning digests as words rather than bytes
+(no measurable change).
+
+**Output.**
+
+- Rates now say whether they are keys or addresses. They differ by 12x, and the
+  summary previously showed one of each without labelling either.
+- Difficulty, estimate and the age-of-the-universe comparison are on separate
+  lines; difficulty above 1e15 prints in scientific notation; the estimate ladder
+  continues past days into years rather than stopping at `1.4e+44 days`.
+
+**Licensing and credit.** Added the `LICENSE` the repo never had (MIT), a
+`NOTICE` carrying vanitygen's AGPL-3.0 attribution to samr7, and a Credits
+section. The repo is public.
+
+**Fixed** a flaky test of my own making: the range sampling check required every
+prefix to produce a hit, but hit rates span 1-in-70 to 1-in-25,000, so it failed
+at random about one run in five.
+
+## 1.0.0
+
+Initial release.
+
+- Vanity address search on the CPU with [vanitygen](https://github.com/samr7/vanitygen)
+  and on the GPU with `cuda/vanity.cu`.
+- A Base58 prefix as a numeric range on the hash160, so the GPU never computes
+  Base58 or a checksum — the prefix test costs 1.6% of the run.
+- Every result from either engine re-derived with `src/keys.js` before it is
+  reported.
+- Two bugs fixed in vanitygen, published in `vendor/patches/`: a crash after a
+  successful match (unjoined worker threads, fatal under OpenSSL 3), and
+  prefixes with exactly three leading `1`s never matching at one of their two
+  Base58 rendering lengths.
