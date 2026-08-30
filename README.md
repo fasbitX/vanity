@@ -5,8 +5,9 @@ Bitcoin vanity address search — an address that starts with something you chos
 
 **Two separate engines**, not one ported from one place to another:
 
-- **[vanitygen](https://github.com/samr7/vanitygen), on the CPU.** Third-party,
-  2013, OpenSSL-based. It stays on the CPU. What was done to it was make it
+- **[vanitygen](https://github.com/samr7/vanitygen), on the CPU.** By
+  [samr7](https://github.com/samr7), 2011-2013, AGPL-3.0. Third-party and
+  OpenSSL-based. It stays on the CPU. What was done to it was make it
   *build* on a current system — it targets OpenSSL 1.0 and PCRE1, neither of
   which exists here — and fix two real bugs found along the way. It is still
   useful beyond searching: because it derives addresses with OpenSSL, it is an
@@ -28,6 +29,18 @@ npm run gpu -- 1Btcoin        # ~13 seconds
 npm run vanity -- 1Btc        # the CPU tool
 npm run matches               # what has been found
 ```
+
+## Requirements
+
+- **Linux.** Developed on Ubuntu 24.04.
+- **An NVIDIA GPU** for the fast engine — CUDA, built for `sm_89` (Ada / RTX
+  40-series) by default. Other architectures: `make -C cuda ARCH=sm_86`. The
+  CPU engine needs no GPU at all.
+- **Node.js 20+**, **PostgreSQL**, and a C toolchain with `libssl-dev` and
+  `libpcre2-dev` to build vanitygen.
+
+Quoted rates are from an RTX 4070 SUPER and a Ryzen 9 9950X. Yours will differ;
+the search prints its actual rate as it runs.
 
 ### What was *not* done
 
@@ -167,12 +180,42 @@ private keys.
 SELECT pattern, address, engine, form, seconds FROM vanity_matches ORDER BY found_at;
 ```
 
-## vanitygen is not vendored
+## Credits
 
-It is AGPL-3.0 and this project is MIT. `scripts/build-vanitygen.sh` clones it
-into `vendor/vanitygen/` (gitignored) at a pinned commit, applies the patch, and
-builds it; it runs as a subprocess and is never linked. Only the patch is
-tracked. See `vendor/README.md`.
+The CPU engine is **[vanitygen](https://github.com/samr7/vanitygen)** by
+**[samr7](https://github.com/samr7)** — Copyright (C) 2011
+`samr7@cs.washington.edu`, AGPL-3.0. It has been the reference vanity address
+generator since 2011, it is still fast and still correct thirteen years later,
+and the design of the search here owes a lot to reading it. This project would
+have been a much longer road without it.
+
+It is used at upstream commit
+[`cd1a728`](https://github.com/samr7/vanitygen/commit/cd1a7282431dcf7e522777976aa18728ee5bb7be),
+the last one, from 2013.
+
+### The patch, offered back
+
+`vendor/patches/0001-openssl3-pcre2.patch` is a modification of vanitygen and
+is therefore AGPL-3.0 itself, as its header says. It is here in the open so
+anyone else stuck building 2013 code can take it. It does three things:
+
+1. makes it compile against OpenSSL 3.x and PCRE2, neither of which existed in
+   the form it was written for;
+2. fixes a crash after a successful match (unjoined worker threads);
+3. fixes prefixes with exactly three leading `1`s never matching at one of
+   their two possible Base58 rendering lengths.
+
+(2) and (3) are bugs in vanitygen itself, not artefacts of the port. Upstream
+has been dormant since 2013, so they are published here rather than filed.
+
+## Licensing
+
+This project is **MIT** (see `LICENSE`). vanitygen is **AGPL-3.0** and is
+deliberately **not vendored**: `scripts/build-vanitygen.sh` clones it from
+upstream at a pinned commit into `vendor/vanitygen/` (gitignored), applies the
+patch, and builds it. It is executed as a separate process and never linked, so
+the two licences stay apart. Only the patch is tracked here, and it carries
+vanitygen's licence.
 
 Only `vanitygen` and `keyconv` are built from it — see "What was *not* done"
 above for why its OpenCL engine is left alone.
