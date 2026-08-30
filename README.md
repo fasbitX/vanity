@@ -185,6 +185,54 @@ folds, but all sixty-four **rounds** still have to run whatever the message
 words are, and the rounds are the bulk of a block. Specialising it further is
 worth very little.
 
+### Two searches on one card halve each other
+
+They do not queue, they interleave, and neither says so. The run looks healthy
+and the rate is quietly divided — which is easy to mistake for the change you
+were about to measure. `npm run gpu` now lists any other process on the device
+before it starts and repeats the caveat next to the final number.
+
+On an idle card the rate is flat, so a long search does not decay: 863–880M
+addr/s sampled over 100 seconds, 2745 MHz, 148 W, 68 °C, no throttling.
+
+### Many patterns at once
+
+The range test runs twelve times per curve step, once per address, so its cost
+scales with the number of ranges. A linear scan made sixteen prefixes cost 14%
+of the run where one cost 0.9%.
+
+Ranges are sorted by lower bound on the host, so the kernel bisects: the only
+candidate is the last range whose lower bound is at or below the value.
+
+| ranges | linear scan | bisecting |
+|---|---|---|
+| 2 (one prefix) | 864M addr/s | 859M |
+| 29 (sixteen prefixes) | 752M addr/s | **849M** |
+
+Bisection needs disjoint ranges, and prefixes nest — every `1Btcoin` address is
+also a `1Btc` address. The host detects overlap and tells the kernel to scan
+linearly instead, which is correct whatever the arrangement.
+### Difficulty
+
+Two things about the number the tool prints.
+
+The obvious formula — one factor of 58 per fixed character — is wrong, and
+comfortably so: for `1Btc` it gives 195,112 where the true figure is 77,178. A
+Base58 prefix does not pin down whole digits; it pins the address *number* to a
+range, and the width of that range is the difficulty. The first character after
+the leading `1` is only partly constrained, which is where the missing factor of
+~2.5 lives. Leading `1`s are different again — they are zero *bytes*, so each
+costs 256 rather than 58, and `111` is exactly 65,536.
+
+The denominator matters too. vanitygen divides the 2^192 space of 25-byte
+values; only **2^160** of those are addresses anyone can reach, because the four
+checksum bytes follow from the hash160 rather than being free. For any prefix
+short enough to search the two agree exactly — the ranges differ by the same
+2^32 as the spaces do — so this shows up only once a prefix pins the address to
+fewer than 2^32 values. There it matters: a complete 34-character address costs
+**2^160**, one key per address, where counting 25-byte values gives 2^192 and
+overstates the work by a factor of four billion.
+
 ### What the numbers rule out
 
 Measured and rejected, so nobody spends a day rediscovering them:

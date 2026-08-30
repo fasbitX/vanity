@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.2.2
+
+**Difficulty is now counted over reachable addresses.** It divided the 2^192
+space of 25-byte values, following vanitygen. Only **2^160** of those are
+addresses anyone can reach — the four checksum bytes follow from the hash160
+rather than being free — so the count is done on the hash160 instead.
+
+For any prefix short enough to be worth searching the two agree exactly, and
+`test/range.js` still holds us to vanitygen's figure across 85 prefixes. The
+difference appears only once a prefix pins the address to fewer than 2^32
+values, and there it is large: a complete 34-character address was reported as
+2^192 when the real work is 2^160 — an overstatement by a factor of four
+billion, on exactly the input where someone is checking whether it is possible.
+
+Turned up while costing a thousand-card pool against puzzle #140: brute-forcing
+one address is 2^160 addresses, 3.6e28 years at a thousand of these cards,
+against 109 years for kangaroo on the same hardware — because kangaroo has the
+public key and a bounded range and pays the square root, and vanity search has
+neither.
+
+**Restores two README sections** deleted by accident in 1.2.0, when a section
+replacement spanned further than intended: "Two searches on one card halve each
+other" and "Many patterns at once". Adds a Difficulty section, which this
+repo's README had never carried.
+
 ## 1.2.1
 
 **SHA-256 audited for the same fault as RIPEMD; it does not have it.** Both

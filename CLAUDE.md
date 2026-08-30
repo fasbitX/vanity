@@ -81,6 +81,11 @@ npm run test:all
   dropping the uncompressed encoding (33% SLOWER per address -- the two hash
   chains hide each other's latency), and returning digests as words instead of
   bytes (no change). The search is hash-bound now; the curve is 14%.
+- **Difficulty is per REACHABLE address (2^160), not per 25-byte value
+  (2^192).** The checksum follows from the hash160, so only 2^160 of the 2^192
+  values exist. Agrees with vanitygen for anything searchable; diverges only for
+  prefixes pinning the address to under 2^32 values, where it matters a lot — a
+  full address is 2^160, not 2^192.
 - **Prefix difficulty is not 58 per character.** `1Btc` is 77,178, not 195,112 —
   a prefix pins the address *number* to a range, and the first character after
   the leading `1` is only partly constrained. Leading `1`s cost 256 each, not

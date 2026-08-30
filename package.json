@@ -1,6 +1,6 @@
 {
   "name": "vanity",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Bitcoin vanity address search, on the CPU with vanitygen and on the GPU with a CUDA kernel, with every result re-derived from first principles before it is believed",
   "main": "src/keys.js",
   "scripts": {
