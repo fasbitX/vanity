@@ -1,0 +1,228 @@
+'use strict';
+/**
+ * Drives cuda/gpu-vanity, and checks everything it reports.
+ *
+ * The kernel tests a *widened* range (see src/vanity-range.js: the checksum is
+ * shifted off, which rounds both bounds outward), and it never computes a
+ * Base58 address at all. So a HIT line is a candidate, in exactly the sense a
+ * Bloom hit is a candidate in the funded-address hunt: it is confirmed here by
+ * re-deriving the key with src/keys.js and looking at the actual address.
+ *
+ * That confirmation is not a formality. It is the only thing standing between
+ * a bug in 200 lines of hand-written CUDA field arithmetic and a private key
+ * being reported as valuable.
+ */
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawn } = require('child_process');
+const { deriveKeyPair } = require('./keys');
+const { hash160Bounds, difficulty } = require('./vanity-range');
+const { matchesPattern } = require('./vanitygen');
+
+const ROOT = path.join(__dirname, '..');
+const BIN = process.env.GPU_VANITY_BIN || path.join(ROOT, 'cuda', 'gpu-vanity');
+const VANITY_FILE = process.env.VANITY_FILE || path.join(ROOT, 'VANITY.txt');
+
+class GpuVanityError extends Error {}
+
+/**
+ * Which prefix each range index belongs to. The kernel reports a range number;
+ * a caller wants the pattern. A prefix can contribute more than one range.
+ */
+function rangeOwners(prefixes) {
+  const owner = [];
+  prefixes.forEach((p, pi) => {
+    for (let i = 0; i < hash160Bounds(p).length; i++) owner.push(pi);
+  });
+  return owner;
+}
+
+/**
+ * Ranges file: uint32 count, then per range five big-endian lo words and five
+ * hi words.
+ */
+function writeRanges(prefixes, file) {
+  const rows = [];
+  for (const p of prefixes) rows.push(...hash160Bounds(p));
+  if (rows.length === 0) throw new GpuVanityError('no searchable ranges');
+  if (rows.length > 32) {
+    throw new GpuVanityError(
+      `${prefixes.length} prefixes need ${rows.length} ranges; the kernel holds 32`);
+  }
+  const buf = Buffer.alloc(4 + rows.length * 40);
+  buf.writeUInt32LE(rows.length, 0);
+  rows.forEach((r, i) => {
+    const off = 4 + i * 40;
+    for (let w = 0; w < 5; w++) buf.writeUInt32LE(r.lo[w], off + w * 4);
+    for (let w = 0; w < 5; w++) buf.writeUInt32LE(r.hi[w], off + 20 + w * 4);
+  });
+  fs.writeFileSync(file, buf);
+  return rangeOwners(prefixes);
+}
+
+/**
+ * Confirm one candidate. Returns the derived key pair, or throws.
+ *
+ * `form` says which of the two addresses the kernel matched -- a key produces a
+ * different address in each encoding, and only one of them may carry the prefix.
+ */
+function confirm({ privHex, form, h160, prefix, mode = 'prefix' }) {
+  const k = BigInt('0x' + privHex);
+  if (k <= 0n) throw new GpuVanityError(`kernel reported a zero private key`);
+  const derived = deriveKeyPair(k);
+  const address = form === 'compressed' ? derived.addressCompressed : derived.addressUncompressed;
+
+  // The GPU's own hash160 must agree with ours. This is the check that catches
+  // a broken field or hash kernel, as opposed to a merely-too-wide range.
+  const ourH160 = require('./hash')
+    .hash160(Buffer.from(form === 'compressed'
+      ? derived.publicKeyCompressed : derived.publicKeyUncompressed, 'hex'))
+    .toString('hex');
+  if (ourH160 !== h160) {
+    throw new GpuVanityError(
+      'hash160 mismatch -- the GPU and src/keys.js disagree for the same key\n' +
+      `  private key  ${derived.privateKeyHex}\n` +
+      `  gpu          ${h160}\n` +
+      `  src/keys.js  ${ourH160}`);
+  }
+
+  return { key: derived, address, form, prefix, mode };
+}
+
+/**
+ * Run a search.
+ *
+ * `onMatch` only ever sees confirmed matches. `onNear` sees candidates the
+ * widened range admitted but the real address does not satisfy -- expected, and
+ * worth counting, because a flood of them would mean the range math is wrong.
+ */
+function run({ prefixes, blocks, threads = 256, ...rest } = {}) {
+  if (!Array.isArray(prefixes) || prefixes.length === 0) {
+    throw new GpuVanityError('at least one prefix is required');
+  }
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gpu-vanity-'));
+  const rangeFile = path.join(tmp, 'ranges.bin');
+  const startFile = path.join(tmp, 'start.bin');
+  writeRanges(prefixes, rangeFile);
+
+  // Fresh random seeds every run. A fixed seed file would make two searches
+  // for the same prefix walk the same keys and return the same address.
+  const { buildSeeds } = require('../scripts/seed');
+  buildSeeds((blocks || 56) * threads, startFile);
+
+  return runWith({ prefixes, blocks, threads, rangeFile, startFile, cleanupDir: tmp, ...rest });
+}
+
+/**
+ * The same search against seed and range files a caller has already prepared.
+ * Exists so a test can plant a known key at thread 0 and require the GPU to
+ * find it -- see test/gpu-vanity.js.
+ */
+function runWith({
+  prefixes,
+  rangeFile,
+  startFile,
+  mode = 'prefix',
+  blocks,
+  threads = 256,
+  groups = 256,
+  maxMatches = 1,
+  timeoutMs,
+  resultFile = VANITY_FILE,
+  cleanupDir = null,
+  onMatch = () => {},
+  onProgress = () => {},
+  onNear = () => {},
+} = {}) {
+  if (!fs.existsSync(BIN)) {
+    throw new GpuVanityError(`gpu-vanity is not built at ${BIN}\n  run: npm run gpu:build`);
+  }
+  const owner = rangeOwners(prefixes);
+
+  const args = ['--ranges', rangeFile, '--start', startFile,
+                '--threads', String(threads), '--groups', String(groups)];
+  if (blocks) args.push('--blocks', String(blocks));
+
+  const child = spawn(BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+  const found = [];
+  const errors = [];
+  let near = 0, overflow = 0, keys = 0, stopping = false;
+  let buf = '';
+
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    child.kill('SIGTERM');
+  };
+
+  const line = (l) => {
+    if (l.startsWith('PROGRESS ')) { keys = Number(l.slice(9)); onProgress(keys); return; }
+    if (l.startsWith('OVERFLOW ')) { overflow += Number(l.slice(9)); return; }
+    if (!l.startsWith('HIT ')) return;
+    if (stopping) return;
+
+    const [, privHex, form, h160, rangeIdx] = l.split(/\s+/);
+    const prefix = prefixes[owner[Number(rangeIdx)]];
+    let rec;
+    try {
+      rec = confirm({ privHex, form, h160, prefix, mode });
+    } catch (e) {
+      errors.push(e);
+      return stop();
+    }
+    // The widened range admits a couple of hash160 values per bound whose real
+    // checksum puts the address just outside the prefix. Not an error.
+    if (!matchesPattern(rec.address, prefix, mode)) { near++; onNear(rec); return; }
+
+    // Durable copy first, database second -- same order as MATCHES.txt.
+    if (resultFile) {
+      fs.appendFileSync(resultFile,
+        `Pattern: ${prefix}\nAddress: ${rec.address}\nPrivkey: ` +
+        `${form === 'compressed' ? rec.key.wifCompressed : rec.key.wifUncompressed}\n`);
+    }
+    found.push(rec);
+    onMatch(rec);
+    if (found.length >= maxMatches) stop();
+  };
+
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (d) => {
+    buf += d;
+    const parts = buf.split('\n');
+    buf = parts.pop();
+    for (const l of parts) line(l.trim());
+  });
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (d) => onProgress(null, d));
+
+  let timer = null, timedOut = false;
+  if (timeoutMs) timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
+
+  const done = new Promise((resolve, reject) => {
+    child.on('error', (e) => {
+      if (timer) clearTimeout(timer);
+      reject(new GpuVanityError(`could not run ${BIN}: ${e.message}`));
+    });
+    child.on('close', () => {
+      if (timer) clearTimeout(timer);
+      if (cleanupDir) fs.rmSync(cleanupDir, { recursive: true, force: true });
+      if (errors.length) {
+        const e = new GpuVanityError(
+          `${errors.length} candidate(s) failed confirmation against src/keys.js:\n` +
+          errors.map((x) => x.message).join('\n'));
+        e.failures = errors;
+        return reject(e);
+      }
+      resolve({ found, keys, near, overflow, timedOut, hitMax: found.length >= maxMatches });
+    });
+  });
+
+  return { child, done, stop };
+}
+
+module.exports = {
+  BIN, VANITY_FILE, GpuVanityError,
+  run, runWith, confirm, writeRanges, rangeOwners, difficulty,
+};

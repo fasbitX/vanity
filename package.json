@@ -1,0 +1,26 @@
+{
+  "name": "vanity",
+  "version": "1.0.0",
+  "description": "Bitcoin vanity address search, on the CPU with vanitygen and on the GPU with a CUDA kernel, with every result re-derived from first principles before it is believed",
+  "main": "src/keys.js",
+  "scripts": {
+    "test": "node test/vectors.js",
+    "test:range": "node test/range.js",
+    "test:vanitygen": "node test/vanitygen.js",
+    "test:gpu": "node test/gpu.js",
+    "test:all": "node test/vectors.js && node test/range.js && node test/vanitygen.js && node test/gpu.js",
+    "init-db": "node scripts/init-db.js",
+    "build": "./scripts/build-vanitygen.sh && make -C cuda",
+    "build:vanitygen": "./scripts/build-vanitygen.sh",
+    "build:gpu": "make -C cuda",
+    "vanity": "node scripts/vanity.js",
+    "gpu": "node scripts/gpu-vanity.js",
+    "matches": "node scripts/matches.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@noble/secp256k1": "^2.3.0",
+    "pg": "^8.23.0",
+    "secp256k1": "^5.0.2"
+  }
+}

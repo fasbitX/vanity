@@ -1,0 +1,13 @@
+node_modules/
+
+# Real private keys live in both of these.
+.env
+VANITY.txt
+
+# vanitygen: AGPL-3.0 upstream, cloned and patched at build time by
+# scripts/build-vanitygen.sh. Only vendor/patches/ is tracked.
+vendor/vanitygen/
+
+# Build output
+cuda/gpu-vanity
+cuda/*.o
