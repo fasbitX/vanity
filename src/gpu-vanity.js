@@ -15,7 +15,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const { deriveKeyPair } = require('./keys');
 const { N } = require('./secp256k1');
 
@@ -56,6 +56,38 @@ const BIN = process.env.GPU_VANITY_BIN || path.join(ROOT, 'cuda', 'gpu-vanity');
 const VANITY_FILE = process.env.VANITY_FILE || path.join(ROOT, 'VANITY.txt');
 
 class GpuVanityError extends Error {}
+
+/**
+ * Other processes already computing on the GPU.
+ *
+ * Two searches on one card do not queue, they interleave, and each gets about
+ * half the rate with no indication that anything is wrong. That is genuinely
+ * confusing: the run looks healthy, the number is just quietly halved, and it
+ * is easy to blame the change you were about to measure. Worth a warning.
+ *
+ * Returns [] if nvidia-smi is missing or unhappy -- this is a courtesy, not
+ * something to fail a search over.
+ */
+function gpuTenants() {
+  let out;
+  try {
+    out = execFileSync('nvidia-smi',
+      ['--query-compute-apps=pid,process_name,used_memory', '--format=csv,noheader'],
+      { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return [];
+  }
+  return out.split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const [pid, name, memory] = l.split(',').map((x) => x.trim());
+      return { pid: Number(pid), name, memory };
+    })
+    // Our own kernel has not been spawned yet when this is called, so anything
+    // listed belongs to somebody else.
+    .filter((t) => Number.isFinite(t.pid) && t.pid !== process.pid);
+}
 
 /**
  * Which prefix each range index belongs to. The kernel reports a range number;
@@ -258,6 +290,6 @@ function runWith({
 }
 
 module.exports = {
-  BIN, VANITY_FILE, GpuVanityError, LAMBDA, VARIANTS,
+  BIN, VANITY_FILE, GpuVanityError, LAMBDA, VARIANTS, gpuTenants,
   run, runWith, confirm, variantKey, writeRanges, rangeOwners, difficulty,
 };

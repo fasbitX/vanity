@@ -142,6 +142,16 @@ thing that would have been expensive — Base58 and a checksum per candidate —
 not done at all. Before the endomorphism the curve was 46% of the cost; it is
 now 14%, and the search is hash-bound.
 
+### Two searches on one card halve each other
+
+They do not queue, they interleave, and neither says so. The run looks healthy
+and the rate is quietly divided — which is easy to mistake for the change you
+were about to measure. `npm run gpu` now lists any other process on the device
+before it starts and repeats the caveat next to the final number.
+
+On an idle card the rate is flat, so a long search does not decay: 863–880M
+addr/s sampled over 100 seconds, 2745 MHz, 148 W, 68 °C, no throttling.
+
 ### What the numbers rule out
 
 Measured and rejected, so nobody spends a day rediscovering them:

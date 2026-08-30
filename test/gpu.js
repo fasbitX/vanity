@@ -40,6 +40,16 @@ const WIKI = {
     return summary();
   }
 
+  // The same trap that cost an hour of confused benchmarking: another process
+  // on the card halves everything silently. It does not make these checks
+  // wrong, but it does make the timeouts tighter than they look.
+  const busy = gv.gpuTenants();
+  if (busy.length) {
+    console.log(`\n  NOTE: ${busy.length} other process(es) are using the GPU ` +
+                `(${busy.map((t) => t.pid).join(', ')}).`);
+    console.log('        The card is shared, so these checks run slower than usual.');
+  }
+
   console.log('\nGPU, with a planted key');
 
   await checkAsync('finds a planted key and derives its published address', async () => {

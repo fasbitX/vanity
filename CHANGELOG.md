@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.1
+
+**Warn when the GPU is already busy.** Two searches on one card do not queue,
+they interleave, and each gets about half the rate with nothing to say so. The
+run looks healthy and the number is quietly halved, which is easy to blame on
+whatever you were about to measure — it cost an hour of confused benchmarking
+here before anyone noticed the card had two tenants.
+
+`npm run gpu` now lists any other process on the device before starting, says
+to expect roughly 1/n of the usual rate, and repeats the caveat next to the
+final number. `test/gpu.js` prints the same note. Measured on an idle card the
+sustained rate is flat: 863–880M addr/s over 100 seconds, 2745 MHz, 148 W,
+68 °C, no thermal decay.
+
 ## 1.1.0
 
 **Twelve addresses per curve step — 495M → 865M addresses/sec (1.75x).**

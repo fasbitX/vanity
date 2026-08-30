@@ -132,8 +132,20 @@ async function main() {
     console.log(`    estimate     ${e.time} on the GPU`);
     if (e.scale) console.log(`    for scale    ${e.scale}`);
   }
+  // Two searches on one card halve each other silently. Say so before the
+  // rate turns up looking wrong.
+  const tenants = gv.gpuTenants();
+  if (tenants.length) {
+    console.log(`\n  WARNING: the GPU is already busy with ` +
+                `${tenants.length} other process(es):`);
+    for (const t of tenants) console.log(`    pid ${t.pid}  ${t.name}  ${t.memory}`);
+    console.log('    They do not queue -- the card is shared, so expect roughly');
+    console.log(`    1/${tenants.length + 1} of the usual rate. Stop them for a clean run.`);
+  }
+
   console.log(`\nsearching ${ranges} range(s), 12 addresses per curve step ` +
-              `(~72M keys/sec = ~865M addresses/sec)\n`);
+              `(~72M keys/sec = ~865M addresses/sec` +
+              `${tenants.length ? ', shared' : ''})\n`);
 
   const started = Date.now();
   const stored = [];
@@ -193,6 +205,10 @@ async function main() {
   }
 
   const secs = (Date.now() - started) / 1000;
+  if (tenants.length) {
+    console.log(`\nnote: the GPU was shared with ${tenants.length} other process(es) ` +
+                'for this run, so the rate below is not the card\'s full speed');
+  }
   console.log(`\n${stored.length} match(es) in ${secs.toFixed(1)}s, ` +
               `${commas(result.keys)} keys = ${commas(result.keys * ADDR_PER_KEY)} addresses ` +
               `(${(result.keys / secs / 1e6).toFixed(0)} Mkey/s = ` +
