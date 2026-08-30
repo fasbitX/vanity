@@ -106,16 +106,20 @@ function fmtDifficulty(d) {
 
 function eta(d) {
   const s = Number(d) / ADDR_PER_SEC;
-  if (s < 1) return 'under a second';
-  if (s < 90) return `${s.toFixed(1)}s`;
-  if (s < 5400) return `${(s / 60).toFixed(1)} min`;
-  if (s < 172800) return `${(s / 3600).toFixed(1)} hours`;
+  if (s < 1) return { time: 'under a second' };
+  if (s < 90) return { time: `~${s.toFixed(1)}s` };
+  if (s < 5400) return { time: `~${(s / 60).toFixed(1)} min` };
+  if (s < 172800) return { time: `~${(s / 3600).toFixed(1)} hours` };
   const days = s / 86400;
-  if (days < 730) return `${days.toFixed(1)} days`;
+  if (days < 730) return { time: `~${days.toFixed(1)} days` };
   const years = days / 365.25;
-  if (years < 1e6) return `${Math.round(years).toLocaleString('en-US')} years`;
-  return `${years.toExponential(1)} years -- ` +
-         `${(years / 1.38e10).toExponential(1)}x the age of the universe`;
+  if (years < 1e6) return { time: `~${Math.round(years).toLocaleString('en-US')} years` };
+  // Past this point the number stops meaning anything on its own, so give it
+  // something to lean against: the universe is about 1.38e10 years old.
+  return {
+    time: `~${years.toExponential(1)} years`,
+    scale: `${(years / 1.38e10).toExponential(1)}x the age of the universe`,
+  };
 }
 
 async function main() {
@@ -131,8 +135,12 @@ async function main() {
     const d = opt.mode === 'regex' ? null : Number(difficulty(p));
     if (d === null) { console.log(`  ${p}  (regex -- difficulty not computable)`); continue; }
     total += d;
-    console.log(`  ${p}  difficulty ${fmtDifficulty(d)}  ` +
-                `(~${eta(d)} on the CPU at ~2.4M addr/s; the GPU is ~215x faster)`);
+    const e = eta(d);
+    console.log(`  ${p}`);
+    console.log(`    difficulty   ${fmtDifficulty(d)}`);
+    console.log(`    estimate     ${e.time} on the CPU at ~2.4M addr/s`);
+    if (e.scale) console.log(`    for scale    ${e.scale}`);
+    console.log(`    note         the GPU engine is ~215x faster: npm run gpu`);
   }
   if (opt.patterns.length > 1) console.log(`  total difficulty ${commas(total)}`);
   console.log(`\nsearching (${opt.mode})... results also appended to ${vg.VANITY_FILE}\n`);
