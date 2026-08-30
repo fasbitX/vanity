@@ -19,8 +19,14 @@ const gv = require('../src/gpu-vanity');
 const { difficulty, prefixRanges } = require('../src/vanity-range');
 const { validatePrefix } = require('../src/vanitygen');
 
-// Measured on this box: 253.8 Mkey/s = 507.6 M addresses/s, both encodings.
-// Only used for the estimate printed before a search starts.
+// The kernel checks BOTH the compressed and the uncompressed address of every
+// key, so one key is two chances at a match. Difficulty is quoted per address,
+// so estimates use the address rate; the live counter reports keys because that
+// is what the kernel counts. Every rate printed says which it is -- reporting a
+// key rate and an address rate as if they were the same number is confusing,
+// and off by exactly 2x.
+const ADDR_PER_KEY = 2;
+// Measured on this box: 253.8 Mkey/s = 507.6M addresses/s.
 const ADDR_PER_SEC = 507.6e6;
 
 function usage(msg) {
@@ -80,15 +86,32 @@ async function store(rec, { difficulty: d, seconds }) {
 
 const commas = (n) => Number(n).toLocaleString('en-US');
 
+/**
+ * Difficulty spans an absurd range -- 22 for "1B", 2^192 for a whole address --
+ * so past a point commas stop helping and start hiding the magnitude.
+ */
+function fmtDifficulty(d) {
+  const n = Number(d);
+  if (!isFinite(n)) return String(d);
+  if (n < 1e15) return Math.round(n).toLocaleString('en-US');
+  return n.toExponential(3);
+}
+
 function eta(d) {
-  // Two addresses per key, so the expected work is halved against a CPU tool
-  // that only searches one encoding.
+  // d is per *address*, and the address rate is what the GPU delivers.
   const s = Number(d) / ADDR_PER_SEC;
   if (s < 1) return 'under a second';
   if (s < 90) return `${s.toFixed(1)}s`;
   if (s < 5400) return `${(s / 60).toFixed(1)} min`;
   if (s < 172800) return `${(s / 3600).toFixed(1)} hours`;
-  return `${(s / 86400).toFixed(1)} days`;
+  const days = s / 86400;
+  if (days < 730) return `${days.toFixed(1)} days`;
+  const years = days / 365.25;
+  if (years < 1e6) return `${Math.round(years).toLocaleString('en-US')} years`;
+  // Past this point the number stops meaning anything, so say so in a way a
+  // person can actually weigh: the universe is about 1.4e10 years old.
+  return `${years.toExponential(1)} years -- ` +
+         `${(years / 1.38e10).toExponential(1)}x the age of the universe`;
 }
 
 async function main() {
@@ -99,9 +122,10 @@ async function main() {
   for (const p of opt.prefixes) {
     const d = difficulty(p);
     ranges += prefixRanges(p).length;
-    console.log(`  ${p}  difficulty ${commas(d)}  (~${eta(d)} on the GPU)`);
+    console.log(`  ${p}  difficulty ${fmtDifficulty(d)}  (~${eta(d)} on the GPU)`);
   }
-  console.log(`\nsearching ${ranges} range(s) at ~507M addresses/sec...\n`);
+  console.log(`\nsearching ${ranges} range(s), both key encodings ` +
+              `(~254M keys/sec = ~507M addresses/sec)\n`);
 
   const started = Date.now();
   const stored = [];
@@ -130,7 +154,9 @@ async function main() {
       if (now - lastDraw < 500) return;
       lastDraw = now;
       const rate = keys / ((now - started) / 1000) / 1e6;
-      process.stdout.write(`\r  ${commas(keys)} keys, ${rate.toFixed(0)} Mkey/s   `);
+      process.stdout.write(
+        `\r  ${commas(keys)} keys, ${rate.toFixed(0)} Mkey/s ` +
+        `= ${(rate * ADDR_PER_KEY).toFixed(0)}M addr/s   `);
     },
   });
 
@@ -160,7 +186,9 @@ async function main() {
 
   const secs = (Date.now() - started) / 1000;
   console.log(`\n${stored.length} match(es) in ${secs.toFixed(1)}s, ` +
-              `${commas(result.keys)} keys (${(result.keys / secs / 1e6).toFixed(0)} Mkey/s)`);
+              `${commas(result.keys)} keys = ${commas(result.keys * ADDR_PER_KEY)} addresses ` +
+              `(${(result.keys / secs / 1e6).toFixed(0)} Mkey/s = ` +
+              `${(result.keys * ADDR_PER_KEY / secs / 1e6).toFixed(0)}M addr/s)`);
   // Candidates the widened range admitted whose real address missed. A handful
   // is normal; a torrent would mean the range math is wrong.
   if (result.near) console.log(`${result.near} boundary candidate(s) rejected on the real address`);

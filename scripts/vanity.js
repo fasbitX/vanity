@@ -84,13 +84,38 @@ async function store(rec, { difficulty, seconds }) {
 
 const commas = (n) => n.toLocaleString('en-US');
 
-/** Rough wall-clock estimate, at the rate this machine actually manages. */
-function eta(difficulty, keysPerSec) {
-  const s = difficulty / keysPerSec;
-  if (s < 90) return `${s.toFixed(0)}s`;
+/**
+ * Rough wall-clock estimate.
+ *
+ * vanitygen searches ONE address per key -- the uncompressed one -- so its key
+ * rate and its address rate are the same number. (The GPU engine checks both
+ * encodings, so there they differ by 2x; every rate printed says which it is.)
+ */
+const ADDR_PER_SEC = 2.36e6;   // measured: 2.36 Mkey/s on 32 threads of a 9950X
+
+/**
+ * Difficulty spans an absurd range -- 22 for "1B", 2^192 for a whole address --
+ * so past a point commas stop helping and start hiding the magnitude.
+ */
+function fmtDifficulty(d) {
+  const n = Number(d);
+  if (!isFinite(n)) return String(d);
+  if (n < 1e15) return Math.round(n).toLocaleString('en-US');
+  return n.toExponential(3);
+}
+
+function eta(d) {
+  const s = Number(d) / ADDR_PER_SEC;
+  if (s < 1) return 'under a second';
+  if (s < 90) return `${s.toFixed(1)}s`;
   if (s < 5400) return `${(s / 60).toFixed(1)} min`;
   if (s < 172800) return `${(s / 3600).toFixed(1)} hours`;
-  return `${(s / 86400).toFixed(1)} days`;
+  const days = s / 86400;
+  if (days < 730) return `${days.toFixed(1)} days`;
+  const years = days / 365.25;
+  if (years < 1e6) return `${Math.round(years).toLocaleString('en-US')} years`;
+  return `${years.toExponential(1)} years -- ` +
+         `${(years / 1.38e10).toExponential(1)}x the age of the universe`;
 }
 
 async function main() {
@@ -106,7 +131,8 @@ async function main() {
     const d = opt.mode === 'regex' ? null : Number(difficulty(p));
     if (d === null) { console.log(`  ${p}  (regex -- difficulty not computable)`); continue; }
     total += d;
-    console.log(`  ${p}  difficulty ${commas(d)}  (~${eta(d, 1.3e6)} at 1.3 Mkey/s)`);
+    console.log(`  ${p}  difficulty ${fmtDifficulty(d)}  ` +
+                `(~${eta(d)} on the CPU at ~2.4M addr/s; the GPU is ~215x faster)`);
   }
   if (opt.patterns.length > 1) console.log(`  total difficulty ${commas(total)}`);
   console.log(`\nsearching (${opt.mode})... results also appended to ${vg.VANITY_FILE}\n`);
