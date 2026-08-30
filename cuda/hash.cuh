@@ -120,7 +120,7 @@ __device__ void ripemd160_32(const uint8_t *data, uint8_t out[20]) {
   uint32_t al=h0,bl=h1,cl=h2,dl=h3,el=h4;
   uint32_t ar=h0,br=h1,cr=h2,dr=h3,er=h4;
 
-  #pragma unroll 16
+  #pragma unroll
   for (int j = 0; j < 80; j++) {
     int r = j / 16;
     uint32_t t;
@@ -221,7 +221,7 @@ __device__ __forceinline__ void ripemd160_core(const uint32_t in[8], uint32_t o[
   uint32_t al=h0,bl=h1,cl=h2,dl=h3,el=h4;
   uint32_t ar=h0,br=h1,cr=h2,dr=h3,er=h4;
 
-  #pragma unroll 16
+  #pragma unroll
   for (int j = 0; j < 80; j++) {
     int r = j / 16;
     uint32_t t;
@@ -313,10 +313,17 @@ __device__ __forceinline__ void hash160_point_be(const fe &x, const fe &y,
   uint32_t d[8];
   #pragma unroll
   for (int i = 0; i < 8; i++) d[i] = bswap32_(st[i]);
+#ifdef SKIP_RIPEMD
+  // Measurement only: stop after SHA-256 and consume its output, so the two
+  // halves of hash160 can be priced separately.
+  #pragma unroll
+  for (int i = 0; i < 5; i++) out[i] = d[i];
+#else
   uint32_t o[5];
   ripemd160_core(d, o);
   #pragma unroll
   for (int i = 0; i < 5; i++) out[i] = bswap32_(o[i]);
+#endif
 }
 
 /** The byte form, for callers that want the digest rather than a comparison. */

@@ -28,8 +28,8 @@ const { validatePrefix } = require('../src/vanitygen');
 // the address rate; the live counter reports keys, because curve steps are what
 // the kernel counts.
 const ADDR_PER_KEY = 12;
-// Measured on this box: 72.1 Mkey/s = 865M addresses/s.
-const ADDR_PER_SEC = 865e6;
+// Measured on this box: 107 Mkey/s = 1287M addresses/s.
+const ADDR_PER_SEC = 1287e6;
 
 function usage(msg) {
   if (msg) console.error(`\n${msg}`);
@@ -144,7 +144,7 @@ async function main() {
   }
 
   console.log(`\nsearching ${ranges} range(s), 12 addresses per curve step ` +
-              `(~72M keys/sec = ~865M addresses/sec` +
+              `(~107M keys/sec = ~1287M addresses/sec` +
               `${tenants.length ? ', shared' : ''})\n`);
 
   const started = Date.now();

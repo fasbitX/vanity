@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.2.0
+
+**One `#pragma` was worth 44%: 859 → 1287M addresses/sec.**
+
+RIPEMD-160 was 57% of the run. Its 80-round loop carried `#pragma unroll 16`,
+and the consequences were invisible in the source:
+
+- `X[RL[j]]` indexes the message block by a table value. Partly unrolled, `j` is
+  a runtime value, so `RL[j]` is too, so `X` had to be addressable — it lived in
+  **local memory**, off-chip, and all 160 rounds went there for a message word.
+- `switch (r)` picking the round function stayed a real branch instead of
+  folding, 160 times per hash and twelve hashes per curve step.
+
+Removing the count makes `RL[j]`, `SL[j]` and `KL[r]` compile-time constants:
+`X` stays in registers, the switch vanishes, and the tables fold into immediates
+(`cmem` 4632 bytes → 16).
+
+| stage | before | after |
+|---|---|---|
+| RIPEMD-160 | 7.98 ns/step | **3.24** |
+| whole kernel | 14.0 ns/step | **9.32** |
+| rate | 859M addr/s | **1287M** |
+
+It is faster while *spilling* 164 bytes that the previous build did not — spill
+counts are not the thing to optimise, wall-clock is. Partial unrolls are worse
+than either extreme: at 20 and 40 the tables stay in constant memory and it runs
+at 843M and 758M.
+
+Also **rejected, measured twice**: a rolling 16-word SHA-256 message schedule in
+place of `w[64]`. No change — nvcc already does that liveness analysis, and
+registers went *up*, 238 to 242.
+
+New profile: SHA-256 42%, RIPEMD-160 35%, curve 22%, prefix test 1.4%.
+
 ## 1.1.2
 
 **Searching many patterns at once no longer costs 13%.** The range test is run

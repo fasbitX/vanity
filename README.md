@@ -13,7 +13,7 @@ Bitcoin vanity address search — an address that starts with something you chos
   useful beyond searching: because it derives addresses with OpenSSL, it is an
   independent implementation to check our own maths against.
 - **`cuda/vanity.cu`, on the GPU.** Written here, from scratch, in CUDA. Does
-  the same job **366x faster**. It is not vanitygen compiled for a GPU and
+  the same job **545x faster**. It is not vanitygen compiled for a GPU and
   shares no code with it.
 
 Neither is believed on its own: every result from either is re-derived from
@@ -61,12 +61,12 @@ Two things get assumed, and neither is true here:
 | engine | curve steps/s | addresses/s |
 |---|---|---|
 | vanitygen, 32 threads of a 9950X | 2.36M | 2.36M |
-| `cuda/vanity.cu`, RTX 4070 SUPER | 72.1M | **865M** |
+| `cuda/vanity.cu`, RTX 4070 SUPER | 107M | **1287M** |
 
-**366x the addresses.** Addresses is the number that matters — difficulty is
+**545x the addresses.** Addresses is the number that matters — difficulty is
 quoted per address — and the two engines get there differently: vanitygen tries
 one address per key, while a single curve step here yields twelve. `1Btcoin`
-takes about 17 seconds on the GPU and 1.8 hours on the CPU.
+takes about 12 seconds on the GPU and 1.8 hours on the CPU.
 
 ## The trick: no Base58 on the GPU
 
@@ -116,6 +116,8 @@ step**. `λ³ = 1`, so six is all of them; there is no seventh.
 | 2 — plus its negation | 165M | 661M | 1.51 |
 | **6 — plus both endomorphisms** | **72M** | **865M** | **1.16** |
 
+(measured before the RIPEMD unroll fix below, which lifted all three)
+
 The kernel reports which of the six matched; `src/gpu-vanity.js` turns that back
 into a private key. Nothing rests on that mapping being right — the address is
 re-derived from whichever key comes out and compared against the one that
@@ -125,22 +127,58 @@ six to be found and correctly attributed.
 
 ## Where the time goes
 
-Measured by differencing instrumented kernels — `-DPROFILE_STAGE=1|2|3` builds
-one that stops after the curve, one that stops after hashing, one that does
-everything. Each stage still consumes its result so the compiler cannot delete
-the work that produced it. RTX 4070 SUPER, idle, repeated:
+Measured by differencing instrumented kernels — `-DPROFILE_STAGE=1` stops after
+the curve, `-DSKIP_RIPEMD` stops after SHA-256, the default does everything.
+Each stage still consumes its result so the compiler cannot delete the work that
+produced it. RTX 4070 SUPER, idle, repeated:
 
-| stage | ns/address | share |
-|---|---|---|
-| elliptic curve — one affine addition + ⅛ inverse, over twelve addresses | 0.17 | **14%** |
-| hash160 — SHA-256 and RIPEMD-160 | 0.97 | **84%** |
-| prefix range test | 0.02 | **1.6%** |
-| **total** | **1.15** | 865M addr/s |
+| stage | ns/curve step | ns/address | share |
+|---|---|---|---|
+| elliptic curve — one affine addition + ⅛ inverse | 2.01 | 0.167 | **22%** |
+| SHA-256 — eighteen blocks | 3.94 | 0.328 | **42%** |
+| RIPEMD-160 — twelve | 3.24 | 0.270 | **35%** |
+| prefix range test | 0.13 | 0.011 | **1.4%** |
+| **total** | **9.32** | **0.78** | 1287M addr/s |
 
-The prefix test costing 1.6% is the whole argument for the range approach: the
+The prefix test costing 1.4% is the whole argument for the range approach: the
 thing that would have been expensive — Base58 and a checksum per candidate — is
-not done at all. Before the endomorphism the curve was 46% of the cost; it is
-now 14%, and the search is hash-bound.
+not done at all.
+
+### A `#pragma` worth 44%
+
+RIPEMD-160 used to be 57% of the run, at 7.98 ns per curve step. Its 80-round
+loop carried `#pragma unroll 16`, which sounds harmless and was not:
+
+- `X[RL[j]]` indexes the 16-word message block by a value from a table. With the
+  loop only partly unrolled `j` is a runtime value, so `RL[j]` is a runtime
+  value, so `X` had to be **addressable** — it lived in local memory, which is
+  off-chip, and every one of the 160 rounds went there for its message word.
+- `switch (r)` selecting the round function was a real branch rather than
+  folding away, 160 times per hash, twelve hashes per curve step.
+
+Removing the count so the loop unrolls fully makes `RL[j]`, `SL[j]` and `KL[r]`
+compile-time constants: `X` stays in registers, the switch disappears, and the
+constant tables fold into immediates (`cmem` fell from 4632 bytes to 16).
+
+**7.98 ns → 3.24 ns for the RIPEMD stage; 859 → 1287M addresses/sec overall.**
+It does this while *spilling* 164 bytes, which the previous version did not —
+a reminder that spill counts are not the thing to optimise, wall-clock is.
+Partial unrolls are worse than either extreme: at 20 and 40 the tables stay in
+constant memory and it runs at 843M and 758M.
+
+### What the numbers rule out
+
+Measured and rejected, so nobody spends a day rediscovering them:
+
+| idea | result |
+|---|---|
+| rolling 16-word SHA-256 schedule instead of `w[64]` | no change, tried twice. nvcc already does that liveness analysis; registers went *up* 238 → 242 |
+| specialise the uncompressed key's padding SHA-256 block | ≤5% — it costs 0.20 ns/key and nvcc already folds most of the constant schedule |
+| drop the uncompressed encoding | **33% slower per address** — the two chains are independent and hide each other's latency |
+| return the digest as words rather than bytes | no measurable change; nvcc already saw through the byte packing. Kept for being more direct |
+
+What is left is the two hash functions themselves, which are fixed by the
+address format. SHA-256 is now the largest single line at 42%.
 
 ### Two searches on one card halve each other
 
