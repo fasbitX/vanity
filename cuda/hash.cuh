@@ -202,7 +202,13 @@ __device__ __forceinline__ uint32_t bswap32_(uint32_t v) {
 }
 
 /** RIPEMD-160 over 8 little-endian words (a SHA-256 digest), no byte buffer. */
-__device__ void ripemd160_words(const uint32_t in[8], uint8_t out[20]) {
+/**
+ * RIPEMD-160 of one 32-byte input, left as five 32-bit words.
+ *
+ * Split out from ripemd160_words() so a caller that wants to compare the digest
+ * numerically never has to take it apart into bytes and put it back together.
+ */
+__device__ __forceinline__ void ripemd160_core(const uint32_t in[8], uint32_t o[5]) {
   uint32_t X[16];
   #pragma unroll
   for (int i = 0; i < 8; i++) X[i] = in[i];
@@ -235,7 +241,14 @@ __device__ void ripemd160_words(const uint32_t in[8], uint8_t out[20]) {
     ar = er; er = dr; dr = ROTL(cr, 10); cr = br; br = t;
   }
 
-  uint32_t o[5] = {h1 + cl + dr, h2 + dl + er, h3 + el + ar, h4 + al + br, h0 + bl + cr};
+  o[0] = h1 + cl + dr; o[1] = h2 + dl + er; o[2] = h3 + el + ar;
+  o[3] = h4 + al + br; o[4] = h0 + bl + cr;
+}
+
+/** The same digest as twenty little-endian bytes. */
+__device__ __forceinline__ void ripemd160_words(const uint32_t in[8], uint8_t out[20]) {
+  uint32_t o[5];
+  ripemd160_core(in, o);
   #pragma unroll
   for (int i = 0; i < 5; i++) {
     out[i*4]   = (uint8_t)(o[i]);
@@ -246,7 +259,21 @@ __device__ void ripemd160_words(const uint32_t in[8], uint8_t out[20]) {
 }
 
 /** hash160 of a serialized public key, built straight from the coordinates. */
-__device__ void hash160_point(const fe &x, const fe &y, bool compressed, uint8_t out[20]) {
+/**
+ * hash160 of a point, delivered as five big-endian 32-bit words.
+ *
+ * The bytes of a hash160 are the RIPEMD state written little-endian, and a
+ * numeric comparison wants them big-endian, so the byte form was being built
+ * one byte at a time and immediately taken apart again one byte at a time.
+ * bswap32 does the whole job in one instruction per word.
+ *
+ * It also keeps the digest in registers. Handing a `uint8_t[20]` to a function
+ * that is not inlined forces the array into local memory, which is off-chip:
+ * the kernel was carrying 64 bytes of stack per thread for two digests it only
+ * ever wanted to compare.
+ */
+__device__ __forceinline__ void hash160_point_be(const fe &x, const fe &y,
+                                                 bool compressed, uint32_t out[5]) {
   uint32_t st[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
                     0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
   uint32_t x32[8], w[16];
@@ -286,5 +313,22 @@ __device__ void hash160_point(const fe &x, const fe &y, bool compressed, uint8_t
   uint32_t d[8];
   #pragma unroll
   for (int i = 0; i < 8; i++) d[i] = bswap32_(st[i]);
-  ripemd160_words(d, out);
+  uint32_t o[5];
+  ripemd160_core(d, o);
+  #pragma unroll
+  for (int i = 0; i < 5; i++) out[i] = bswap32_(o[i]);
+}
+
+/** The byte form, for callers that want the digest rather than a comparison. */
+__device__ __forceinline__ void hash160_point(const fe &x, const fe &y,
+                                              bool compressed, uint8_t out[20]) {
+  uint32_t w[5];
+  hash160_point_be(x, y, compressed, w);
+  #pragma unroll
+  for (int i = 0; i < 5; i++) {
+    out[i*4]   = (uint8_t)(w[i] >> 24);
+    out[i*4+1] = (uint8_t)(w[i] >> 16);
+    out[i*4+2] = (uint8_t)(w[i] >> 8);
+    out[i*4+3] = (uint8_t)(w[i]);
+  }
 }

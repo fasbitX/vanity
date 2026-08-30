@@ -54,20 +54,40 @@ check('no match is missed and none is invented', () => {
   // Draw address numbers from the byte window the leading 1s imply, then
   // compare "the encoding starts with the prefix" against "the number is in a
   // range". A disagreement either way is a defect.
+  //
+  // How often a random draw lands on a match varies enormously between
+  // prefixes -- "111h" hits about 1 in 70, "11Bt" about 1 in 25,000 -- so
+  // requiring every prefix to produce a hit made this fail at random roughly
+  // one run in five. Whether a *particular* prefix produced hits is not the
+  // point; whether the sample as a whole exercised the predicate is. So the
+  // expected count is computed from the range widths and only asserted where
+  // it is high enough to mean something.
+  const SAMPLES = 40000;
+  let exercised = 0;
   for (const p of ['111h', '11Bt', '1111Q', '1z']) {
     const rs = range.prefixRanges(p);
     let z = 0; while (z < p.length && p[z] === '1') z++;
     const lo = 256n ** BigInt(24 - z), hi = 256n ** BigInt(25 - z);
+    const width = rs.reduce((t, r) => t + (r.hi - r.lo), 0n);
+    // Expected hits = samples * (matching values / values in the window).
+    const expected = SAMPLES * Number((width * 1000000n) / (hi - lo)) / 1e6;
+
     let hits = 0, invented = 0, missed = 0;
-    for (let i = 0; i < 40000; i++) {
+    for (let i = 0; i < SAMPLES; i++) {
       const A = lo + (BigInt('0x' + crypto.randomBytes(24).toString('hex')) % (hi - lo));
       const m = encode25(A).startsWith(p), q = inAny(A, rs);
       if (m && q) hits++; else if (q) invented++; else if (m) missed++;
     }
     assert.strictEqual(invented, 0, `${p}: ${invented} numbers accepted that do not match`);
     assert.strictEqual(missed, 0, `${p}: ${missed} matching numbers not in any range`);
-    assert.ok(hits > 0, `${p}: the sample produced no matches, so it proved nothing`);
+    if (expected >= 10) {
+      assert.ok(hits > 0,
+        `${p}: expected ~${expected.toFixed(0)} matches in the sample and got none`);
+      exercised++;
+    }
   }
+  // Without this the whole check could pass by never drawing a matching number.
+  assert.ok(exercised > 0, 'no prefix had a high enough hit rate to prove anything');
 });
 
 check('the sampling check can actually fail', () => {

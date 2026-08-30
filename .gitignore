@@ -10,4 +10,7 @@ vendor/vanitygen/
 
 # Build output
 cuda/gpu-vanity
+cuda/gpu-vanity64
+cuda/gpu-vanity-s[123]
+cuda/gpu-hf[123]
 cuda/*.o

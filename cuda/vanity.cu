@@ -33,6 +33,29 @@
 #ifndef GRP
 #define GRP 8
 #endif
+
+// Measurement only: which public-key encodings to hash.
+//   1 = compressed only   (33 bytes -> ONE SHA-256 block + RIPEMD)
+//   2 = uncompressed only (65 bytes -> TWO SHA-256 blocks + RIPEMD)
+//   3 = both (default, what the search actually does)
+// Differencing 1 and 2 prices the second SHA block of the uncompressed form,
+// which carries one data byte and sixty-three bytes of padding.
+#ifndef HASH_FORMS
+#define HASH_FORMS 3
+#endif
+
+// Profiling levels: 1 = curve only, 2 = + hash160, 3 = full pipeline.
+// Each stage still consumes its result so the compiler cannot delete the work
+// that produced it.
+#ifndef PROFILE_STAGE
+#define PROFILE_STAGE 3
+#endif
+
+#if FIELD32
+#define FE_LIMBS_N 8
+#else
+#define FE_LIMBS_N 4
+#endif
 #define MAX_HITS 256
 #define MAX_RANGES 32
 
@@ -61,15 +84,6 @@ struct Hit {
   uint32_t range;      // which prefix range matched
 };
 
-/** hash160 as five big-endian words, the form the bounds are stored in. */
-__device__ __forceinline__ void h160_words(const uint8_t *h, uint32_t w[5]) {
-  #pragma unroll
-  for (int i = 0; i < 5; i++) {
-    w[i] = ((uint32_t)h[4*i] << 24) | ((uint32_t)h[4*i+1] << 16) |
-           ((uint32_t)h[4*i+2] << 8) | (uint32_t)h[4*i+3];
-  }
-}
-
 /**
  * Which range contains this hash160, or -1.
  *
@@ -93,14 +107,25 @@ __device__ __forceinline__ int range_of(const uint32_t w[5], uint32_t nRanges) {
   return -1;
 }
 
+/**
+ * Write out a hit. Takes the digest as words and unpacks to bytes here, because
+ * this runs once per match rather than twice per key: the byte form costs
+ * nothing where it is actually needed, and forcing it on the hot path cost a
+ * local-memory round trip for every key that was never going to match.
+ */
 __device__ __forceinline__ void record(Hit *hits, uint32_t *nHits, const uint64_t kk[4],
-                                       const uint8_t *h, uint32_t form, int range) {
+                                       const uint32_t w[5], uint32_t form, int range) {
   uint32_t slot = atomicAdd(nHits, 1u);
   if (slot >= MAX_HITS) return;
   #pragma unroll
   for (int j = 0; j < 4; j++) hits[slot].k[j] = kk[j];
   #pragma unroll
-  for (int j = 0; j < 20; j++) hits[slot].h160[j] = h[j];
+  for (int i = 0; i < 5; i++) {
+    hits[slot].h160[i*4]     = (uint8_t)(w[i] >> 24);
+    hits[slot].h160[i*4 + 1] = (uint8_t)(w[i] >> 16);
+    hits[slot].h160[i*4 + 2] = (uint8_t)(w[i] >> 8);
+    hits[slot].h160[i*4 + 3] = (uint8_t)(w[i]);
+  }
   hits[slot].form = form;
   hits[slot].range = (uint32_t)range;
 }
@@ -177,9 +202,29 @@ __global__ void vanity_kernel(uint64_t *startX, uint64_t *startY,
       fe_sub(ny, ny, py);              // y3 = lambda(xP - x3) - yP
       fe_normalize(nx); fe_normalize(ny);
 
-      uint8_t hu[20], hc[20];
-      hash160_point(nx, ny, false, hu);
-      hash160_point(nx, ny, true,  hc);
+      uint32_t hu[5], hc[5];
+#if PROFILE_STAGE >= 2
+#if HASH_FORMS == 1
+      hash160_point_be(nx, ny, true, hc);
+      #pragma unroll
+      for (int j = 0; j < 5; j++) hu[j] = hc[j];
+#elif HASH_FORMS == 2
+      hash160_point_be(nx, ny, false, hu);
+      #pragma unroll
+      for (int j = 0; j < 5; j++) hc[j] = hu[j];
+#else
+      hash160_point_be(nx, ny, false, hu);
+      hash160_point_be(nx, ny, true,  hc);
+#endif
+#else
+      // Stage 1: no hashing. Fold the point in anyway so the curve arithmetic
+      // that produced it cannot be optimised away.
+      #pragma unroll
+      for (int j = 0; j < 5; j++) {
+        hu[j] = (uint32_t)nx.l[j % FE_LIMBS_N];
+        hc[j] = hu[j];
+      }
+#endif
 
       // key for this point is k + (i + 1)
       uint64_t kk[4] = {k[0], k[1], k[2], k[3]};
@@ -192,14 +237,16 @@ __global__ void vanity_kernel(uint64_t *startX, uint64_t *startY,
       // Both encodings are searched. They are different addresses from the same
       // key, so this doubles the addresses per key for the cost of a second
       // hash160 -- and vanitygen only ever searched the uncompressed one.
-      uint32_t w[5];
-      h160_words(hu, w);
-      int r = range_of(w, nRanges);
+#if PROFILE_STAGE >= 3
+      int r = range_of(hu, nRanges);
       if (r >= 0) record(hits, nHits, kk, hu, 0, r);
 
-      h160_words(hc, w);
-      r = range_of(w, nRanges);
+      r = range_of(hc, nRanges);
       if (r >= 0) record(hits, nHits, kk, hc, 1, r);
+#else
+      // Stages 1-2: no range test, but consume the digest so it survives.
+      if ((hu[0] | hc[0]) == 0xffffffffu && hu[4] == 0xffffffffu) atomicAdd(nHits, 0u);
+#endif
 
       localKeys++;
 
