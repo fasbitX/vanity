@@ -210,7 +210,8 @@ has been dormant since 2013, so they are published here rather than filed.
 
 ## Licensing
 
-This project is **MIT** (see `LICENSE`). vanitygen is **AGPL-3.0** and is
+This project is **MIT** (see `LICENSE`; third-party attribution in `NOTICE`).
+vanitygen is **AGPL-3.0** and is
 deliberately **not vendored**: `scripts/build-vanitygen.sh` clones it from
 upstream at a pinned commit into `vendor/vanitygen/` (gitignored), applies the
 patch, and builds it. It is executed as a separate process and never linked, so

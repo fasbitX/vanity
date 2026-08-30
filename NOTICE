@@ -1,0 +1,37 @@
+vanity
+Copyright (c) 2026 fasbitX
+Licensed under the MIT License; see LICENSE.
+
+------------------------------------------------------------------------------
+Third-party software
+------------------------------------------------------------------------------
+
+This project builds and runs vanitygen, which is a separate program under a
+different licence:
+
+    vanitygen
+    Copyright (C) 2011 samr7 <samr7@cs.washington.edu>
+    https://github.com/samr7/vanitygen
+    GNU Affero General Public License, version 3
+
+vanitygen's source is NOT included in this repository. scripts/build-vanitygen.sh
+clones it from upstream at a pinned commit (cd1a7282431dcf7e522777976aa18728ee5bb7be),
+applies vendor/patches/, and builds it. It is executed as a separate process and
+is never linked into this software, so the two licences remain separate.
+
+vendor/patches/0001-openssl3-pcre2.patch is a modification of vanitygen and is
+therefore itself licensed under the GNU Affero General Public License v3, as
+stated in its header. It is published here so that anyone else building
+vanitygen against OpenSSL 3.x may use it. It contains:
+
+  1. the changes needed to compile against OpenSSL 3.x and PCRE2;
+  2. a fix for a crash after a successful match, caused by worker threads that
+     were never joined;
+  3. a fix for prefixes with exactly three leading "1" characters failing to
+     match at one of their two possible Base58 rendering lengths.
+
+Items 2 and 3 are defects in vanitygen itself rather than artefacts of the
+port. Upstream has been dormant since 2013.
+
+A copy of the GNU Affero General Public License v3 is distributed with
+vanitygen and is available at https://www.gnu.org/licenses/agpl-3.0.html

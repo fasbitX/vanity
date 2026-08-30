@@ -19,18 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This project builds and runs vanitygen, which is a separate program under a
-different licence:
-
-  vanitygen -- Copyright (C) 2011 samr7 <samr7@cs.washington.edu>
-  https://github.com/samr7/vanitygen
-  GNU Affero General Public License v3
-
-vanitygen's source is NOT included here. scripts/build-vanitygen.sh clones it
-from upstream at a pinned commit, applies vendor/patches/, and builds it; it is
-executed as a separate process and is never linked into this software. The
-patch in vendor/patches/ is a modification of vanitygen and is therefore itself
-AGPL-3.0, as its header states.
